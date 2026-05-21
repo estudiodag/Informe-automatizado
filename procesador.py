@@ -567,13 +567,174 @@ def completar_plantilla(plantilla_bytes, data):
 
 
 # ============================================================
+#  COTIZACIÓN EN MERCADO LIBRE
+# ============================================================
+
+def _filtrar_outliers(precios):
+    """
+    Quita valores atípicos usando el método del rango intercuartílico (IQR).
+    Esto evita que un precio absurdamente bajo o alto ensucie el promedio.
+
+    Ejemplo: si los precios son [70k, 75k, 80k, 82k, 85k, 5k, 900k]
+    -> descarta 5k y 900k, promedia el resto.
+    """
+    if len(precios) < 4:
+        # Con pocos datos no se puede calcular IQR de forma confiable.
+        # Filtramos lo evidente: descartar valores < 20% o > 300% de la mediana.
+        if not precios:
+            return []
+        med = statistics.median(precios)
+        return [p for p in precios if 0.2 * med <= p <= 3.0 * med]
+
+    ordenados = sorted(precios)
+    n = len(ordenados)
+    # Cuartiles
+    q1 = ordenados[n // 4]
+    q3 = ordenados[(3 * n) // 4]
+    iqr = q3 - q1
+    # Límites: valores fuera de [Q1 - 1.5*IQR, Q3 + 1.5*IQR] son atípicos
+    limite_inf = q1 - 1.5 * iqr
+    limite_sup = q3 + 1.5 * iqr
+    filtrados = [p for p in ordenados if limite_inf <= p <= limite_sup]
+    return filtrados if filtrados else ordenados
+
+
+def cotizar_pieza(pieza, marca="", modelo=""):
+    """
+    Busca una pieza en Mercado Libre Argentina y devuelve un precio promedio
+    "limpio" (sin valores atípicos).
+
+    Devuelve un dict:
+      {
+        "pieza": str,
+        "query": str,
+        "precio_sugerido": int,   # promedio filtrado, 0 si no hubo resultados
+        "cantidad_resultados": int,
+        "cantidad_usados": int,   # cuántos se usaron para el promedio
+        "rango": (min, max),      # rango de precios usados
+        "error": str or None
+      }
+    """
+    resultado = {
+        "pieza": pieza,
+        "query": "",
+        "precio_sugerido": 0,
+        "cantidad_resultados": 0,
+        "cantidad_usados": 0,
+        "rango": (0, 0),
+        "error": None,
+    }
+
+    # Construir la búsqueda: pieza + marca + modelo para más precisión
+    partes = [pieza]
+    if marca:
+        partes.append(marca)
+    if modelo:
+        # Solo la primera palabra del modelo (ej: "Corolla" de "Corolla XLI 1.8")
+        partes.append(modelo.split()[0])
+    query = " ".join(partes).strip()
+    resultado["query"] = query
+
+    url = (
+        "https://api.mercadolibre.com/sites/MLA/search"
+        "?q=" + quote(query) +
+        "&condition=new&limit=30"
+    )
+
+    try:
+        req = Request(url, headers={"User-Agent": "InformeTasacion/1.0"})
+        with urlopen(req, timeout=12) as resp:
+            datos = json.loads(resp.read().decode("utf-8"))
+
+        items = datos.get("results", [])
+        # Solo precios en pesos argentinos y mayores a 0
+        precios = [
+            it["price"] for it in items
+            if it.get("currency_id") == "ARS" and it.get("price", 0) > 0
+        ]
+        resultado["cantidad_resultados"] = len(precios)
+
+        if not precios:
+            resultado["error"] = "Sin resultados"
+            return resultado
+
+        # Filtrar valores atípicos
+        precios_limpios = _filtrar_outliers(precios)
+        if not precios_limpios:
+            resultado["error"] = "Sin precios válidos tras filtrar"
+            return resultado
+
+        promedio = int(round(sum(precios_limpios) / len(precios_limpios)))
+        resultado["precio_sugerido"] = promedio
+        resultado["cantidad_usados"] = len(precios_limpios)
+        resultado["rango"] = (min(precios_limpios), max(precios_limpios))
+
+    except Exception as e:
+        resultado["error"] = str(e)
+
+    return resultado
+
+
+def cotizar_danos(data, solo_cambiar=True):
+    """
+    Cotiza todas las piezas a CAMBIAR de un informe.
+    Modifica data["danos"] cargando el precio sugerido en cada pieza.
+    Devuelve una lista con el detalle de cada cotización (para mostrar al usuario).
+    """
+    detalle = []
+    marca = data.get("marca", "")
+    modelo = data.get("modelo", "")
+
+    for dano in data["danos"]:
+        # Solo cotizar piezas a CAMBIAR (las REPARAR no llevan precio de repuesto)
+        if solo_cambiar and dano["accion"] != "CAMBIAR":
+            continue
+        # Si ya tiene precio cargado, no lo pisamos
+        if dano.get("precio", 0) > 0:
+            detalle.append({
+                "pieza": dano["pieza"],
+                "precio_sugerido": dano["precio"],
+                "fuente": "cargado manualmente",
+            })
+            continue
+
+        cot = cotizar_pieza(dano["pieza"], marca, modelo)
+        if cot["precio_sugerido"] > 0:
+            dano["precio"] = cot["precio_sugerido"]
+        detalle.append({
+            "pieza": dano["pieza"],
+            "precio_sugerido": cot["precio_sugerido"],
+            "cantidad_resultados": cot["cantidad_resultados"],
+            "cantidad_usados": cot["cantidad_usados"],
+            "rango": cot["rango"],
+            "fuente": "Mercado Libre" if cot["precio_sugerido"] > 0 else "sin cotización",
+            "error": cot["error"],
+        })
+
+        # Pequeña pausa para no saturar la API de Mercado Libre
+        time.sleep(0.25)
+
+    return detalle
+
+
+# ============================================================
 #  FUNCIÓN PRINCIPAL
 # ============================================================
 
-def procesar(plantilla_bytes, texto_peritacion="", excel_peritacion_bytes=None):
+def procesar(plantilla_bytes, texto_peritacion="", excel_peritacion_bytes=None,
+             cotizar=False):
     """
     Función principal: recibe la plantilla y la peritación,
     devuelve los bytes del informe completado.
+
+    Parámetros:
+      plantilla_bytes        -- bytes del Excel virgen
+      texto_peritacion       -- texto libre de la peritación
+      excel_peritacion_bytes -- bytes de un Excel de peritación (opcional)
+      cotizar                -- si True, busca precios en Mercado Libre
+
+    Devuelve:
+      (informe_bytes, data, detalle_cotizacion)
     """
     # Parsear la peritación
     data_texto = parsear_texto(texto_peritacion) if texto_peritacion else data_vacia()
@@ -584,5 +745,11 @@ def procesar(plantilla_bytes, texto_peritacion="", excel_peritacion_bytes=None):
     else:
         data = data_texto
 
+    # Cotizar en Mercado Libre si el usuario lo pidió
+    detalle_cotizacion = []
+    if cotizar:
+        detalle_cotizacion = cotizar_danos(data)
+
     # Completar la plantilla
-    return completar_plantilla(plantilla_bytes, data), data
+    informe_bytes = completar_plantilla(plantilla_bytes, data)
+    return informe_bytes, data, detalle_cotizacion
