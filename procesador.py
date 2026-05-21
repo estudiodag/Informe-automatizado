@@ -396,27 +396,51 @@ def combinar_datos(data_excel, data_texto):
 #  COMPLETAR LA PLANTILLA (PRESERVA LOGOS Y FORMATO)
 # ============================================================
 
-def _celda_escribible(ws, fila, columna):
-    """
-    Devuelve la celda donde realmente se puede escribir.
-    Si la celda (fila, columna) es parte de un rango combinado (merged),
-    devuelve la celda ANCLA del rango (esquina superior izquierda),
-    que es la única escribible. Si no está combinada, devuelve la celda normal.
-    """
-    celda = ws.cell(row=fila, column=columna)
-    # Revisar si la celda cae dentro de algún rango combinado
+def _rango_de(ws, fila, columna):
+    """Devuelve el CellRange combinado que contiene a (fila, columna),
+    o None si la celda no es parte de ningún merge."""
     for rango in ws.merged_cells.ranges:
         if (rango.min_row <= fila <= rango.max_row and
                 rango.min_col <= columna <= rango.max_col):
-            # Devolver la celda ancla (esquina superior izquierda)
-            return ws.cell(row=rango.min_row, column=rango.min_col)
-    return celda
+            return rango
+    return None
+
+
+def _valor_celda(ws, fila, columna):
+    """
+    Lee el valor de una celda de forma segura.
+    Si la celda es parte de un rango combinado, el valor real está
+    en la celda ancla (esquina superior izquierda). Las MergedCell
+    no-ancla siempre tienen value=None.
+    """
+    rango = _rango_de(ws, fila, columna)
+    if rango is not None:
+        return ws.cell(row=rango.min_row, column=rango.min_col).value
+    return ws.cell(row=fila, column=columna).value
 
 
 def _escribir(ws, fila, columna, valor):
-    """Escribe un valor en una celda, manejando celdas combinadas."""
-    celda = _celda_escribible(ws, fila, columna)
-    celda.value = valor
+    """
+    Escribe un valor en una celda manejando celdas combinadas.
+
+    FIX del error "'MergedCell' object attribute 'value' is read-only":
+    si la celda destino cae dentro de un rango combinado, se DESHACE
+    el merge antes de escribir. Así la celda deja de ser una MergedCell
+    inmutable y el value pasa a ser escribible. Luego se vuelve a
+    combinar el rango para preservar el formato visual de la plantilla.
+    """
+    rango = _rango_de(ws, fila, columna)
+    if rango is not None:
+        rango_str = str(rango)
+        anc_row, anc_col = rango.min_row, rango.min_col
+        # Deshacer el merge -> todas las celdas del rango pasan a ser escribibles
+        ws.unmerge_cells(rango_str)
+        # El valor de un rango combinado SIEMPRE va en la celda ancla
+        ws.cell(row=anc_row, column=anc_col).value = valor
+        # Volver a combinar para conservar el aspecto original de la plantilla
+        ws.merge_cells(rango_str)
+    else:
+        ws.cell(row=fila, column=columna).value = valor
 
 
 def _buscar_celda_etiqueta(ws, textos_buscados, ocurrencia=1):
@@ -439,10 +463,11 @@ def _buscar_celda_etiqueta(ws, textos_buscados, ocurrencia=1):
                     if encontradas == ocurrencia:
                         fila = celda.row
                         col = celda.column
-                        # Buscar la siguiente celda vacía a la derecha
+                        # Buscar la siguiente celda vacía a la derecha.
+                        # Se usa _valor_celda para leer correctamente
+                        # incluso si el destino es una celda combinada.
                         for c in range(col + 1, col + 9):
-                            destino = _celda_escribible(ws, fila, c)
-                            if destino.value in (None, ""):
+                            if _valor_celda(ws, fila, c) in (None, ""):
                                 return (fila, c)
                         return (fila, col + 1)
     return None
@@ -534,7 +559,7 @@ def completar_plantilla(plantilla_bytes, data):
                         col_vu = None
                         for r in range(max(1, celda.row - 4), celda.row):
                             for c in range(1, 12):
-                                hv = normalizar(ws3.cell(row=r, column=c).value)
+                                hv = normalizar(_valor_celda(ws3, r, c))
                                 if "CANT" in hv:
                                     col_cant = c
                                 if "UNITARIO" in hv or "V. UNIT" in hv:
@@ -556,7 +581,7 @@ def completar_plantilla(plantilla_bytes, data):
                 if normalizar(celda.value) == "VARIOS":
                     for r in range(max(1, celda.row - 6), celda.row):
                         for c in range(1, 12):
-                            if "SUBTOTAL" in normalizar(ws3.cell(row=r, column=c).value):
+                            if "SUBTOTAL" in normalizar(_valor_celda(ws3, r, c)):
                                 _escribir(ws3, celda.row, c, mo["varios"])
                                 break
 
@@ -566,8 +591,7 @@ def completar_plantilla(plantilla_bytes, data):
                 for celda in fila_celdas:
                     if "FRANQUICIA A DEDUCIR" in normalizar(celda.value):
                         for c in range(celda.column + 1, celda.column + 9):
-                            destino = _celda_escribible(ws3, celda.row, c)
-                            if destino.value in (None, ""):
+                            if _valor_celda(ws3, celda.row, c) in (None, ""):
                                 _escribir(ws3, celda.row, c, data["franquicia"])
                                 break
 
