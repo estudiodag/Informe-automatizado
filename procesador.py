@@ -462,15 +462,17 @@ def _reinyectar_imagenes(plantilla_bytes, generado_bytes):
 
     En algunos entornos (segun version de openpyxl / del sistema), al
     hacer load_workbook + save las imagenes ancladas se descartan.
-    Esta funcion lo detecta y, si faltan, reinyecta a nivel ZIP el grupo
-    completo y consistente de archivos de imagen:
-      - xl/media/*           (las imagenes)
-      - xl/drawings/*        (los anclajes)
-      - xl/worksheets/_rels/* (los vinculos hoja -> drawing)
-    y ajusta [Content_Types].xml para declarar los drawings.
+    Esta funcion lo detecta y, si faltan, reinyecta a nivel ZIP:
+      - xl/media/*      (las imagenes)
+      - xl/drawings/*   (los anclajes y sus rels)
+    y ademas, para cada hoja que tenia imagenes:
+      - agrega la relacion al drawing en su xl/worksheets/_rels/sheetN.xml.rels
+      - inserta la etiqueta <drawing r:id="..."/> dentro de sheetN.xml
+        (sin esto, Excel NO muestra la imagen aunque el archivo este)
+    y declara los drawings en [Content_Types].xml.
 
-    Si openpyxl ya conservo las imagenes, NO toca nada (evita romper algo
-    que ya estaba bien). Si la plantilla no tiene imagenes, tampoco actua.
+    Si openpyxl ya conservo las imagenes, NO toca nada.
+    Si la plantilla no tiene imagenes, tampoco actua.
     """
     try:
         zp = zipfile.ZipFile(BytesIO(plantilla_bytes))
@@ -489,19 +491,28 @@ def _reinyectar_imagenes(plantilla_bytes, generado_bytes):
     if any(n.startswith("xl/media/") for n in nombres_g):
         return generado_bytes
 
-    # --- El generado perdio las imagenes: reinyectar ---
+    # --- Mapear: cada sheetN -> que drawing usa (segun la plantilla) ---
+    # En la plantilla, xl/worksheets/_rels/sheetN.xml.rels apunta al drawing.
+    sheet_a_drawing = {}  # 'sheet1' -> 'drawing1'
+    for n in nombres_p:
+        m = re.match(r"xl/worksheets/_rels/(sheet\d+)\.xml\.rels$", n)
+        if m:
+            contenido = zp.read(n).decode("utf-8")
+            md = re.search(r'Target="\.\./drawings/(drawing\d+\.xml)"',
+                           contenido)
+            if md:
+                sheet_a_drawing[m.group(1)] = md.group(1)
+
+    # Archivos de imagen a copiar tal cual de la plantilla
     grupo = [n for n in nombres_p
              if n.startswith("xl/media/") or n.startswith("xl/drawings/")]
-    ws_rels = [n for n in nombres_p
-               if n.startswith("xl/worksheets/_rels/")]
 
-    # Fusionar [Content_Types].xml: agregar las declaraciones que falten
+    # --- Fusionar [Content_Types].xml ---
     ct = zg.read("[Content_Types].xml").decode("utf-8")
     extras = ""
-    for d in ("drawing1", "drawing2", "drawing3", "drawing4", "drawing5"):
-        part = "/xl/drawings/%s.xml" % d
-        existe_en_plant = ("xl/drawings/%s.xml" % d) in nombres_p
-        if existe_en_plant and part not in ct:
+    for dw in sorted(set(sheet_a_drawing.values())):
+        part = "/xl/drawings/" + dw
+        if part not in ct:
             extras += ('<Override PartName="%s" ContentType='
                        '"application/vnd.openxmlformats-officedocument'
                        '.drawing+xml"/>' % part)
@@ -511,27 +522,103 @@ def _reinyectar_imagenes(plantilla_bytes, generado_bytes):
     if extras:
         ct = ct.replace("</Types>", extras + "</Types>")
 
+    def _agregar_drawing_a_rels(rels_xml, drawing_file):
+        """Garantiza una relacion al drawing y devuelve (xml_nuevo, rId).
+        Si ya hay una relacion de tipo drawing, reutiliza su Id."""
+        # Si ya existe una relacion de drawing, usar ese rId
+        m = re.search(
+            r'<Relationship[^>]*relationships/drawing"[^>]*Id="(rId\d+)"',
+            rels_xml)
+        if not m:
+            m = re.search(
+                r'<Relationship[^>]*Id="(rId\d+)"[^>]*relationships/drawing"',
+                rels_xml)
+        if m:
+            rid = m.group(1)
+            # Reescribir esa relacion para que apunte al drawing correcto
+            rels_xml = re.sub(
+                r'<Relationship[^>]*relationships/drawing"[^>]*/>',
+                '', rels_xml)
+            rels_xml = re.sub(
+                r'<Relationship[^>]*Id="' + rid + r'"[^>]*/>',
+                '', rels_xml)
+        else:
+            usados = re.findall(r'Id="rId(\d+)"', rels_xml)
+            n = max([int(x) for x in usados], default=0) + 1
+            rid = "rId%d" % n
+        rel = ('<Relationship Id="%s" Type="http://schemas.openxmlformats'
+               '.org/officeDocument/2006/relationships/drawing" '
+               'Target="../drawings/%s"/>' % (rid, drawing_file))
+        nuevo = rels_xml.replace("</Relationships>",
+                                 rel + "</Relationships>")
+        return nuevo, rid
+
+    def _insertar_drawing_en_sheet(sheet_xml, rid):
+        """Garantiza <drawing r:id=.../> antes de </worksheet>.
+        Si ya hay una etiqueta <drawing>, la reemplaza por la correcta.
+        Tambien garantiza que el namespace 'r' este declarado, ya que
+        sin xmlns:r el atributo r:id provoca 'unbound prefix' en Excel."""
+        # Quitar cualquier <drawing.../> existente (puede estar roto)
+        sheet_xml = re.sub(r'<drawing\b[^>]*/>', '', sheet_xml)
+        # Asegurar que el tag raiz <worksheet ...> declare xmlns:r
+        if "xmlns:r=" not in sheet_xml:
+            ns = ('xmlns:r="http://schemas.openxmlformats.org/'
+                  'officeDocument/2006/relationships"')
+            sheet_xml = re.sub(
+                r'(<worksheet\b)', r'\1 ' + ns, sheet_xml, count=1)
+        tag = '<drawing r:id="%s"/>' % rid
+        return sheet_xml.replace("</worksheet>", tag + "</worksheet>")
+
     out = BytesIO()
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
         escritos = set()
+
         for item in zg.namelist():
+            # Content_Types fusionado
             if item == "[Content_Types].xml":
                 zout.writestr(item, ct)
                 escritos.add(item)
                 continue
-            # Los worksheets/_rels del generado se reemplazan por los
-            # de la plantilla (que ya vinculan hoja -> drawing).
-            if item.startswith("xl/worksheets/_rels/"):
+
+            # Los .rels de hojas se manejan junto a su sheet -> saltar aqui
+            if re.match(r"xl/worksheets/_rels/sheet\d+\.xml\.rels$", item):
                 continue
+
+            # sheetN.xml: insertar la etiqueta <drawing>
+            ms = re.match(r"xl/worksheets/(sheet\d+)\.xml$", item)
+            if ms and ms.group(1) in sheet_a_drawing:
+                sheet_id = ms.group(1)
+                dw = sheet_a_drawing[sheet_id]
+                rels_path = ("xl/worksheets/_rels/%s.xml.rels"
+                             % sheet_id)
+                if rels_path in nombres_g:
+                    rels_xml = zg.read(rels_path).decode("utf-8")
+                else:
+                    rels_xml = ('<?xml version="1.0" encoding="UTF-8" '
+                                'standalone="yes"?>'
+                                '<Relationships xmlns="http://schemas'
+                                '.openxmlformats.org/package/2006/'
+                                'relationships"></Relationships>')
+                rels_nuevo, rid = _agregar_drawing_a_rels(rels_xml, dw)
+                sheet_xml = zg.read(item).decode("utf-8")
+                sheet_xml = _insertar_drawing_en_sheet(sheet_xml, rid)
+                zout.writestr(item, sheet_xml)
+                zout.writestr(rels_path, rels_nuevo)
+                escritos.add(item)
+                escritos.add(rels_path)
+                continue
+
             zout.writestr(item, zg.read(item))
             escritos.add(item)
-        # Copiar el grupo de imagenes y los rels de la plantilla
-        for item in grupo + ws_rels:
+
+        # Copiar imagenes y drawings de la plantilla
+        for item in grupo:
             if item not in escritos:
                 zout.writestr(item, zp.read(item))
                 escritos.add(item)
 
     return out.getvalue()
+
 
 
 # ============================================================
