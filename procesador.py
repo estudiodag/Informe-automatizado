@@ -396,29 +396,55 @@ def combinar_datos(data_excel, data_texto):
 #  COMPLETAR LA PLANTILLA (PRESERVA LOGOS Y FORMATO)
 # ============================================================
 
+def _celda_escribible(ws, fila, columna):
+    """
+    Devuelve la celda donde realmente se puede escribir.
+    Si la celda (fila, columna) es parte de un rango combinado (merged),
+    devuelve la celda ANCLA del rango (esquina superior izquierda),
+    que es la única escribible. Si no está combinada, devuelve la celda normal.
+    """
+    celda = ws.cell(row=fila, column=columna)
+    # Revisar si la celda cae dentro de algún rango combinado
+    for rango in ws.merged_cells.ranges:
+        if (rango.min_row <= fila <= rango.max_row and
+                rango.min_col <= columna <= rango.max_col):
+            # Devolver la celda ancla (esquina superior izquierda)
+            return ws.cell(row=rango.min_row, column=rango.min_col)
+    return celda
+
+
+def _escribir(ws, fila, columna, valor):
+    """Escribe un valor en una celda, manejando celdas combinadas."""
+    celda = _celda_escribible(ws, fila, columna)
+    celda.value = valor
+
+
 def _buscar_celda_etiqueta(ws, textos_buscados, ocurrencia=1):
     """
     Busca una celda que contenga una etiqueta y devuelve la coordenada
-    de la celda donde hay que escribir el valor (la siguiente celda vacía
-    a la derecha en la misma fila).
+    (fila, columna) de la celda donde hay que escribir el valor
+    (la siguiente celda vacía a la derecha en la misma fila).
+    Devuelve None si no encuentra la etiqueta.
     """
     encontradas = 0
-    for fila in ws.iter_rows():
-        for celda in fila:
+    for fila_celdas in ws.iter_rows():
+        for celda in fila_celdas:
             valor = normalizar(celda.value)
             if not valor:
                 continue
             for buscado in textos_buscados:
-                if normalizar(buscado) in valor or valor == normalizar(buscado):
+                bn = normalizar(buscado)
+                if bn and (bn in valor or valor == bn):
                     encontradas += 1
                     if encontradas == ocurrencia:
-                        # Buscar la siguiente celda vacía a la derecha
+                        fila = celda.row
                         col = celda.column
-                        for c in range(col + 1, col + 8):
-                            destino = ws.cell(row=celda.row, column=c)
+                        # Buscar la siguiente celda vacía a la derecha
+                        for c in range(col + 1, col + 9):
+                            destino = _celda_escribible(ws, fila, c)
                             if destino.value in (None, ""):
-                                return destino
-                        return ws.cell(row=celda.row, column=col + 1)
+                                return (fila, c)
+                        return (fila, col + 1)
     return None
 
 
@@ -426,10 +452,10 @@ def completar_plantilla(plantilla_bytes, data):
     """
     Carga la plantilla virgen y la completa con los datos.
     openpyxl PRESERVA: logos/imágenes, estilos, fórmulas, formato de impresión.
+    Maneja correctamente las celdas combinadas (merged cells).
     Devuelve los bytes del Excel completado.
     """
-    wb = load_workbook(BytesIO(plantilla_bytes))  # NO data_only: conserva fórmulas
-
+    wb = load_workbook(BytesIO(plantilla_bytes))  # conserva fórmulas y formato
     hojas = wb.worksheets
 
     # ---------- HOJA 1: Datos preliminares ----------
@@ -442,36 +468,35 @@ def completar_plantilla(plantilla_bytes, data):
         (["APELLIDO Y NOMBRE"], data["asegurado"]),
         (["MARCA"], data["marca"]),
         (["MODELO"], data["modelo"]),
-        (["AÑO", "ANO"], data["anio"]),
+        (["ANO"], data["anio"]),
         (["DOMINIO", "PATENTE"], data["dominio"]),
         (["CHASIS"], data["chasis"]),
         (["KILOMETRA"], data["kilometraje"]),
         (["SUMA ASEG"], data["sumaAsegurada"]),
         (["NOMBRE"], data["tallerNombre"]),
-        (["DIRECCION", "DIRECCIÓN"], data["tallerDireccion"]),
+        (["DIRECCION"], data["tallerDireccion"]),
         (["LOCALIDAD"], data["tallerLocalidad"]),
     ]
     for etiquetas, valor in mapeo_hoja1:
         if not valor:
             continue
-        celda = _buscar_celda_etiqueta(ws1, etiquetas)
-        if celda is not None:
-            celda.value = valor
+        pos = _buscar_celda_etiqueta(ws1, etiquetas)
+        if pos is not None:
+            _escribir(ws1, pos[0], pos[1], valor)
 
     # Franquicia del vehículo (primera ocurrencia de "FRANQUICIA")
     if data.get("franquiciaVeh"):
-        celda = _buscar_celda_etiqueta(ws1, ["FRANQUICIA"], ocurrencia=1)
-        if celda is not None:
-            celda.value = data["franquiciaVeh"]
+        pos = _buscar_celda_etiqueta(ws1, ["FRANQUICIA"], ocurrencia=1)
+        if pos is not None:
+            _escribir(ws1, pos[0], pos[1], data["franquiciaVeh"])
 
     # ---------- HOJA 2: Descripción de daños ----------
     if len(hojas) > 1:
         ws2 = hojas[1]
-        # Buscar fila del encabezado "ACCIÓN"
         fila_inicio = None
         col_accion = col_pieza = col_precio = None
-        for fila in ws2.iter_rows():
-            for celda in fila:
+        for fila_celdas in ws2.iter_rows():
+            for celda in fila_celdas:
                 v = normalizar(celda.value)
                 if v in ("ACCION", "ACCION:"):
                     fila_inicio = celda.row + 1
@@ -489,10 +514,10 @@ def completar_plantilla(plantilla_bytes, data):
             col_precio = col_precio or 5
             for i, dano in enumerate(data["danos"]):
                 fila = fila_inicio + i
-                ws2.cell(row=fila, column=col_accion).value = dano["accion"]
-                ws2.cell(row=fila, column=col_pieza).value = dano["pieza"]
+                _escribir(ws2, fila, col_accion, dano["accion"])
+                _escribir(ws2, fila, col_pieza, dano["pieza"])
                 if dano["accion"] == "CAMBIAR" and dano["precio"] > 0:
-                    ws2.cell(row=fila, column=col_precio).value = dano["precio"]
+                    _escribir(ws2, fila, col_precio, dano["precio"])
 
     # ---------- HOJA 3: Mano de obra, resumen, observaciones ----------
     if len(hojas) > 2:
@@ -501,11 +526,10 @@ def completar_plantilla(plantilla_bytes, data):
 
         def set_mano_obra(nombre_concepto, cantidad, valor_unitario):
             """Busca la fila del concepto y carga cantidad y valor unitario."""
-            for fila in ws3.iter_rows():
-                for celda in fila:
+            for fila_celdas in ws3.iter_rows():
+                for celda in fila_celdas:
                     v = normalizar(celda.value)
                     if v == normalizar(nombre_concepto):
-                        # Buscar columna CANT. y V.UNITARIO en encabezados
                         col_cant = None
                         col_vu = None
                         for r in range(max(1, celda.row - 4), celda.row):
@@ -516,47 +540,43 @@ def completar_plantilla(plantilla_bytes, data):
                                 if "UNITARIO" in hv or "V. UNIT" in hv:
                                     col_vu = c
                         if col_cant:
-                            ws3.cell(row=celda.row, column=col_cant).value = cantidad
+                            _escribir(ws3, celda.row, col_cant, cantidad)
                         if col_vu and valor_unitario:
-                            ws3.cell(row=celda.row, column=col_vu).value = valor_unitario
+                            _escribir(ws3, celda.row, col_vu, valor_unitario)
                         return
 
         set_mano_obra("Pintura", mo["pintura"], mo["pinturaValor"])
         set_mano_obra("Chapa", mo["chapa"], mo["chapaValor"])
         set_mano_obra("Mecanica", mo["mecanica"], mo["mecanicaValor"])
-        set_mano_obra("Mecánica", mo["mecanica"], mo["mecanicaValor"])
         set_mano_obra("Tapiceria", mo["tapiceria"], mo["tapiceriaValor"])
-        set_mano_obra("Tapicería", mo["tapiceria"], mo["tapiceriaValor"])
 
         # Varios: va directo en SUBTOTAL
-        for fila in ws3.iter_rows():
-            for celda in fila:
+        for fila_celdas in ws3.iter_rows():
+            for celda in fila_celdas:
                 if normalizar(celda.value) == "VARIOS":
-                    # Buscar columna SUBTOTAL
                     for r in range(max(1, celda.row - 6), celda.row):
                         for c in range(1, 12):
                             if "SUBTOTAL" in normalizar(ws3.cell(row=r, column=c).value):
-                                ws3.cell(row=celda.row, column=c).value = mo["varios"]
+                                _escribir(ws3, celda.row, c, mo["varios"])
                                 break
 
         # Franquicia a deducir
         if data.get("franquicia"):
-            for fila in ws3.iter_rows():
-                for celda in fila:
+            for fila_celdas in ws3.iter_rows():
+                for celda in fila_celdas:
                     if "FRANQUICIA A DEDUCIR" in normalizar(celda.value):
-                        # Buscar columna de valor (la última con datos a la derecha)
-                        for c in range(celda.column + 1, celda.column + 8):
-                            destino = ws3.cell(row=celda.row, column=c)
-                            destino.value = data["franquicia"]
-                            break
+                        for c in range(celda.column + 1, celda.column + 9):
+                            destino = _celda_escribible(ws3, celda.row, c)
+                            if destino.value in (None, ""):
+                                _escribir(ws3, celda.row, c, data["franquicia"])
+                                break
 
         # Observaciones
         if data.get("observaciones"):
-            for fila in ws3.iter_rows():
-                for celda in fila:
+            for fila_celdas in ws3.iter_rows():
+                for celda in fila_celdas:
                     if normalizar(celda.value) == "OBSERVACIONES":
-                        # Escribir en la celda de abajo
-                        ws3.cell(row=celda.row + 1, column=celda.column).value = data["observaciones"]
+                        _escribir(ws3, celda.row + 1, celda.column, data["observaciones"])
                         break
 
     # Guardar a bytes
