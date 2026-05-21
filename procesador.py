@@ -135,6 +135,15 @@ def parsear_texto(texto):
             # Calcular posición del valor en la línea original
             inicio = m.start(2)
             valor = linea_orig[inicio:inicio + len(valor_raw)].strip()
+            # Limpiar marcadores y palabras-sección que queden pegados al valor.
+            # Ej: "SUMA ASEG: 8900000 // SUSTITUIR:" -> valor = "8900000"
+            # Nota: NO se corta la coma entre dígitos (ej. "1,8" es decimal).
+            valor = re.split(
+                r"\s*(?://|/|\|)\s*|"
+                r"\s*,\s+|"
+                r"\s+(?=(?:SUSTITUIR|CAMBIAR|PINTAR|REPARAR|REEMPLAZAR|"
+                r"OBSERVACIONES?|MANO DE OBRA)\s*:?\s*$)",
+                valor, maxsplit=1, flags=re.IGNORECASE)[0].strip()
             if not valor:
                 continue
 
@@ -160,14 +169,29 @@ def parsear_texto(texto):
                 if not data[campo]:
                     data[campo] = valor
 
+    # ---- PASO 1b: nº de siniestro sin etiqueta ----
+    # En algunas peritaciones el nº de siniestro aparece solo, como número
+    # suelto en una de las primeras líneas (ej. una línea que dice "6").
+    if not data["numeroSiniestro"]:
+        for linea in lineas[:5]:
+            l = linea.strip()
+            if re.fullmatch(r"\d{1,8}", l):
+                data["numeroSiniestro"] = l
+                break
+
     # ---- PASO 2: secciones de daños y mano de obra ----
+    # Las palabras SUSTITUIR:/PINTAR: pueden estar en su propia línea
+    # O al final de otra línea (ej: "SUMA ASEG: 8900000 // SUSTITUIR:").
+    # Se detecta el marcador en cualquiera de los dos casos.
     sustituir_idx = -1
     pintar_idx = -1
     for i, ln in enumerate(lineas_norm):
         ln = ln.strip()
-        if sustituir_idx < 0 and re.match(r"^(SUSTITUIR|CAMBIAR|REEMPLAZAR)\s*:?\s*$", ln):
+        if sustituir_idx < 0 and re.search(
+                r"(?:^|[\s/|:])(SUSTITUIR|CAMBIAR|REEMPLAZAR)\s*:?\s*$", ln):
             sustituir_idx = i
-        if pintar_idx < 0 and re.match(r"^(PINTAR|REPARAR)\s*:?\s*$", ln):
+        if pintar_idx < 0 and re.search(
+                r"(?:^|[\s/|:])(PINTAR|REPARAR)\s*:?\s*$", ln):
             pintar_idx = i
 
     def es_mano_obra(linea):
@@ -192,9 +216,9 @@ def parsear_texto(texto):
 
     def es_seccion(linea):
         ln = normalizar(linea).strip()
-        return re.match(
-            r"^(SUSTITUIR|CAMBIAR|PINTAR|REPARAR|OBSERVACIONES|OBS|MANO DE OBRA|"
-            r"COTIZACION|REEMPLAZAR)\s*:?\s*$",
+        return re.search(
+            r"(?:^|[\s/|:])(SUSTITUIR|CAMBIAR|PINTAR|REPARAR|OBSERVACIONES|OBS|"
+            r"MANO DE OBRA|COTIZACION|REEMPLAZAR)\s*:?\s*$",
             ln,
         )
 
@@ -443,12 +467,44 @@ def _escribir(ws, fila, columna, valor):
         ws.cell(row=fila, column=columna).value = valor
 
 
+def _es_celda_etiqueta(valor_celda, buscado):
+    """
+    Determina si una celda ES una etiqueta de campo (no solo la contiene
+    como substring accidental).
+
+    Reglas:
+    - El texto buscado debe aparecer en la celda como PALABRA COMPLETA
+      (con límites de palabra), no incrustado dentro de otra palabra.
+      Así 'ANO' matchea 'AÑO:' pero NO 'EMILIANO'.
+    - Además la celda debe parecer una etiqueta: texto corto que termina
+      en ':' o '=', o cuyo contenido es casi solo la etiqueta.
+    """
+    v = normalizar(valor_celda)
+    b = normalizar(buscado)
+    if not v or not b:
+        return False
+
+    # ¿Aparece 'b' como palabra completa dentro de 'v'?
+    if not re.search(r"(?<![A-Z0-9])" + re.escape(b) + r"(?![A-Z0-9])", v):
+        return False
+
+    # La celda debe comportarse como etiqueta:
+    #  - termina en ':' o '=' (típico de un rótulo de campo), o
+    #  - su texto completo (sin ':') es casi la etiqueta (<= 35 chars).
+    v_sin_dos_puntos = v.rstrip(": =").strip()
+    if v.endswith(":") or v.endswith("=") or len(v_sin_dos_puntos) <= 35:
+        return True
+    return False
+
+
 def _buscar_celda_etiqueta(ws, textos_buscados, ocurrencia=1):
     """
-    Busca una celda que contenga una etiqueta y devuelve la coordenada
-    (fila, columna) de la celda donde hay que escribir el valor
-    (la siguiente celda vacía a la derecha en la misma fila).
-    Devuelve None si no encuentra la etiqueta.
+    Busca la celda que ES una etiqueta y devuelve la coordenada (fila, columna)
+    de la celda donde hay que escribir el valor (la siguiente celda vacía a la
+    derecha en la misma fila). Devuelve None si no encuentra la etiqueta.
+
+    Usa coincidencia por palabra completa para no confundir etiquetas cortas
+    con texto que las contenga (ej. 'ANO' dentro de 'EMILIANO').
     """
     encontradas = 0
     for fila_celdas in ws.iter_rows():
@@ -457,8 +513,7 @@ def _buscar_celda_etiqueta(ws, textos_buscados, ocurrencia=1):
             if not valor:
                 continue
             for buscado in textos_buscados:
-                bn = normalizar(buscado)
-                if bn and (bn in valor or valor == bn):
+                if _es_celda_etiqueta(celda.value, buscado):
                     encontradas += 1
                     if encontradas == ocurrencia:
                         fila = celda.row
@@ -493,14 +548,12 @@ def completar_plantilla(plantilla_bytes, data):
         (["APELLIDO Y NOMBRE"], data["asegurado"]),
         (["MARCA"], data["marca"]),
         (["MODELO"], data["modelo"]),
-        (["ANO"], data["anio"]),
+        (["ANO", "AÑO"], data["anio"]),
         (["DOMINIO", "PATENTE"], data["dominio"]),
         (["CHASIS"], data["chasis"]),
-        (["KILOMETRA"], data["kilometraje"]),
-        (["SUMA ASEG"], data["sumaAsegurada"]),
-        (["NOMBRE"], data["tallerNombre"]),
+        (["KILOMETRAJE", "KILOMETRA"], data["kilometraje"]),
+        (["SUMA ASEGURADA", "SUMA ASEG"], data["sumaAsegurada"]),
         (["DIRECCION"], data["tallerDireccion"]),
-        (["LOCALIDAD"], data["tallerLocalidad"]),
     ]
     for etiquetas, valor in mapeo_hoja1:
         if not valor:
@@ -509,11 +562,19 @@ def completar_plantilla(plantilla_bytes, data):
         if pos is not None:
             _escribir(ws1, pos[0], pos[1], valor)
 
-    # Franquicia del vehículo (primera ocurrencia de "FRANQUICIA")
-    if data.get("franquiciaVeh"):
-        pos = _buscar_celda_etiqueta(ws1, ["FRANQUICIA"], ocurrencia=1)
-        if pos is not None:
-            _escribir(ws1, pos[0], pos[1], data["franquiciaVeh"])
+    # Franquicia del vehículo (primera ocurrencia de "FRANQUICIA").
+    # Regla: si no se cargó un valor, se escribe 0 (no se deja vacío).
+    franq_veh = data.get("franquiciaVeh") or 0
+    pos = _buscar_celda_etiqueta(ws1, ["FRANQUICIA"], ocurrencia=1)
+    if pos is not None:
+        _escribir(ws1, pos[0], pos[1], a_numero(franq_veh) if franq_veh else 0)
+
+    # Franquicia a deducir (segunda ocurrencia, etiqueta "FRANQUICIA:").
+    # La Hoja3 la lee desde aquí con una fórmula. Si no hay valor, va 0.
+    franq_ded = data.get("franquicia") or 0
+    pos = _buscar_celda_etiqueta(ws1, ["FRANQUICIA"], ocurrencia=2)
+    if pos is not None:
+        _escribir(ws1, pos[0], pos[1], a_numero(franq_ded) if franq_ded else 0)
 
     # ---------- HOJA 2: Descripción de daños ----------
     if len(hojas) > 1:
@@ -575,23 +636,38 @@ def completar_plantilla(plantilla_bytes, data):
         set_mano_obra("Mecanica", mo["mecanica"], mo["mecanicaValor"])
         set_mano_obra("Tapiceria", mo["tapiceria"], mo["tapiceriaValor"])
 
-        # Varios: va directo en SUBTOTAL
-        for fila_celdas in ws3.iter_rows():
-            for celda in fila_celdas:
-                if normalizar(celda.value) == "VARIOS":
-                    for r in range(max(1, celda.row - 6), celda.row):
-                        for c in range(1, 12):
-                            if "SUBTOTAL" in normalizar(_valor_celda(ws3, r, c)):
-                                _escribir(ws3, celda.row, c, mo["varios"])
-                                break
+        # Varios: la fila "Varios" tiene fórmula SUBTOTAL = CANT * V.UNITARIO.
+        # Para no pisar la fórmula, se carga el monto como V.UNITARIO con CANT=1.
+        if mo["varios"]:
+            for fila_celdas in ws3.iter_rows():
+                for celda in fila_celdas:
+                    if normalizar(celda.value) == "VARIOS":
+                        col_cant = col_vu = None
+                        for r in range(max(1, celda.row - 6), celda.row):
+                            for c in range(1, 12):
+                                hv = normalizar(_valor_celda(ws3, r, c))
+                                if "CANT" in hv:
+                                    col_cant = c
+                                if "UNITARIO" in hv or "V. UNIT" in hv:
+                                    col_vu = c
+                        if col_cant:
+                            _escribir(ws3, celda.row, col_cant, 1)
+                        if col_vu:
+                            _escribir(ws3, celda.row, col_vu, mo["varios"])
 
-        # Franquicia a deducir
+        # Franquicia a deducir: NO se escribe en Hoja3 si esa celda tiene
+        # una fórmula (suele ser =+Hoja1!$F$28). El valor se carga en Hoja1.
         if data.get("franquicia"):
             for fila_celdas in ws3.iter_rows():
                 for celda in fila_celdas:
                     if "FRANQUICIA A DEDUCIR" in normalizar(celda.value):
                         for c in range(celda.column + 1, celda.column + 9):
-                            if _valor_celda(ws3, celda.row, c) in (None, ""):
+                            destino = ws3.cell(row=celda.row, column=c)
+                            val = _valor_celda(ws3, celda.row, c)
+                            # Saltar celdas con fórmula (empiezan con '=')
+                            if isinstance(val, str) and val.startswith("="):
+                                continue
+                            if val in (None, ""):
                                 _escribir(ws3, celda.row, c, data["franquicia"])
                                 break
 
