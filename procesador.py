@@ -7,7 +7,6 @@ Motor de procesamiento de informes de tasacion.
 
 import re
 import time
-import zipfile
 import unicodedata
 import statistics
 from io import BytesIO
@@ -452,55 +451,6 @@ def combinar_datos(data_excel, data_texto):
 
 
 # ============================================================
-#  PRESERVACION DE IMAGENES (LOGOS) VIA ZIP
-# ============================================================
-
-def _reinyectar_imagenes(plantilla_bytes, generado_bytes):
-    """
-    Copia las imagenes (logos de encabezado y pie) de la plantilla original
-    al Excel generado, a nivel ZIP.
-
-    Esto es a prueba de fallos: aunque openpyxl pierda o altere las
-    imagenes/drawings al guardar, esta funcion restaura los archivos
-    originales exactos (xl/media/* y xl/drawings/*).
-
-    Si la plantilla no tiene imagenes, devuelve el generado sin cambios.
-    """
-    try:
-        zin_plant = zipfile.ZipFile(BytesIO(plantilla_bytes))
-        zin_gen = zipfile.ZipFile(BytesIO(generado_bytes))
-    except zipfile.BadZipFile:
-        return generado_bytes
-
-    # Archivos de imagen / drawing de la plantilla original
-    items_img = [n for n in zin_plant.namelist()
-                 if n.startswith("xl/media/")
-                 or n.startswith("xl/drawings/")]
-
-    # Si la plantilla no tiene imagenes, no hay nada que reinyectar
-    if not any(n.startswith("xl/media/") for n in items_img):
-        return generado_bytes
-
-    out = BytesIO()
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
-        # 1. Copiar todo el contenido del generado EXCEPTO media y drawings
-        for item in zin_gen.namelist():
-            if (item.startswith("xl/media/")
-                    or item.startswith("xl/drawings/")):
-                continue
-            zout.writestr(item, zin_gen.read(item))
-        # 2. Copiar media y drawings ORIGINALES de la plantilla
-        copiados = set()
-        for item in items_img:
-            zout.writestr(item, zin_plant.read(item))
-            copiados.add(item)
-        # 3. Por las dudas, si el generado tenia algun drawing/media extra
-        #    que no estaba en la plantilla, no lo copiamos (evita duplicados).
-
-    return out.getvalue()
-
-
-# ============================================================
 #  COMPLETAR LA PLANTILLA (PRESERVA LOGOS Y FORMATO)
 # ============================================================
 
@@ -750,16 +700,14 @@ def completar_plantilla(plantilla_bytes, data):
                 if hecho:
                     break
 
-    # Guardar a bytes
+    # Guardar a bytes.
+    # openpyxl preserva las imagenes (logos), estilos y formulas por si solo.
+    # NO se hace post-procesado del ZIP: alterarlo rompe las referencias
+    # internas (worksheets/_rels) y Excel marca el archivo como danado.
     salida = BytesIO()
     wb.save(salida)
     salida.seek(0)
-    generado = salida.read()
-
-    # PRESERVAR LOGOS: reinyectar imagenes originales de la plantilla.
-    # Esto garantiza que los logos de encabezado y pie no se pierdan,
-    # aunque openpyxl los haya alterado al guardar.
-    return _reinyectar_imagenes(plantilla_bytes, generado)
+    return salida.read()
 
 
 # ============================================================
