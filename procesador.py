@@ -7,6 +7,7 @@ Motor de procesamiento de informes de tasacion.
 
 import re
 import time
+import zipfile
 import unicodedata
 import statistics
 from io import BytesIO
@@ -451,6 +452,89 @@ def combinar_datos(data_excel, data_texto):
 
 
 # ============================================================
+#  PRESERVACION DE IMAGENES (LOGOS)
+# ============================================================
+
+def _reinyectar_imagenes(plantilla_bytes, generado_bytes):
+    """
+    Restaura los logos de la plantilla en el informe generado, PERO solo
+    si openpyxl los perdio al guardar.
+
+    En algunos entornos (segun version de openpyxl / del sistema), al
+    hacer load_workbook + save las imagenes ancladas se descartan.
+    Esta funcion lo detecta y, si faltan, reinyecta a nivel ZIP el grupo
+    completo y consistente de archivos de imagen:
+      - xl/media/*           (las imagenes)
+      - xl/drawings/*        (los anclajes)
+      - xl/worksheets/_rels/* (los vinculos hoja -> drawing)
+    y ajusta [Content_Types].xml para declarar los drawings.
+
+    Si openpyxl ya conservo las imagenes, NO toca nada (evita romper algo
+    que ya estaba bien). Si la plantilla no tiene imagenes, tampoco actua.
+    """
+    try:
+        zp = zipfile.ZipFile(BytesIO(plantilla_bytes))
+        zg = zipfile.ZipFile(BytesIO(generado_bytes))
+    except zipfile.BadZipFile:
+        return generado_bytes
+
+    nombres_p = set(zp.namelist())
+    nombres_g = set(zg.namelist())
+
+    # La plantilla no tiene imagenes -> nada que reinyectar
+    if not any(n.startswith("xl/media/") for n in nombres_p):
+        return generado_bytes
+
+    # El generado YA conservo las imagenes -> no tocar
+    if any(n.startswith("xl/media/") for n in nombres_g):
+        return generado_bytes
+
+    # --- El generado perdio las imagenes: reinyectar ---
+    grupo = [n for n in nombres_p
+             if n.startswith("xl/media/") or n.startswith("xl/drawings/")]
+    ws_rels = [n for n in nombres_p
+               if n.startswith("xl/worksheets/_rels/")]
+
+    # Fusionar [Content_Types].xml: agregar las declaraciones que falten
+    ct = zg.read("[Content_Types].xml").decode("utf-8")
+    extras = ""
+    for d in ("drawing1", "drawing2", "drawing3", "drawing4", "drawing5"):
+        part = "/xl/drawings/%s.xml" % d
+        existe_en_plant = ("xl/drawings/%s.xml" % d) in nombres_p
+        if existe_en_plant and part not in ct:
+            extras += ('<Override PartName="%s" ContentType='
+                       '"application/vnd.openxmlformats-officedocument'
+                       '.drawing+xml"/>' % part)
+    if 'Extension="png"' not in ct:
+        extras = ('<Default Extension="png" ContentType="image/png"/>'
+                  + extras)
+    if extras:
+        ct = ct.replace("</Types>", extras + "</Types>")
+
+    out = BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+        escritos = set()
+        for item in zg.namelist():
+            if item == "[Content_Types].xml":
+                zout.writestr(item, ct)
+                escritos.add(item)
+                continue
+            # Los worksheets/_rels del generado se reemplazan por los
+            # de la plantilla (que ya vinculan hoja -> drawing).
+            if item.startswith("xl/worksheets/_rels/"):
+                continue
+            zout.writestr(item, zg.read(item))
+            escritos.add(item)
+        # Copiar el grupo de imagenes y los rels de la plantilla
+        for item in grupo + ws_rels:
+            if item not in escritos:
+                zout.writestr(item, zp.read(item))
+                escritos.add(item)
+
+    return out.getvalue()
+
+
+# ============================================================
 #  COMPLETAR LA PLANTILLA (PRESERVA LOGOS Y FORMATO)
 # ============================================================
 
@@ -701,13 +785,15 @@ def completar_plantilla(plantilla_bytes, data):
                     break
 
     # Guardar a bytes.
-    # openpyxl preserva las imagenes (logos), estilos y formulas por si solo.
-    # NO se hace post-procesado del ZIP: alterarlo rompe las referencias
-    # internas (worksheets/_rels) y Excel marca el archivo como danado.
     salida = BytesIO()
     wb.save(salida)
     salida.seek(0)
-    return salida.read()
+    generado = salida.read()
+
+    # PRESERVAR LOGOS: si openpyxl perdio las imagenes al guardar
+    # (ocurre en algunos entornos), se reinyectan desde la plantilla.
+    # Si openpyxl ya las conservo, esta funcion no hace nada.
+    return _reinyectar_imagenes(plantilla_bytes, generado)
 
 
 # ============================================================
