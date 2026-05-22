@@ -1,21 +1,29 @@
 """
 procesador.py
 Motor de procesamiento de informes de tasacion.
-- Parsea el texto/Excel de la peritacion.
-- Completa la plantilla virgen preservando logos, estilos y formulas.
+
+- Usa la API de Claude (Anthropic) para ENTENDER el peritaje en lenguaje
+  libre y extraer los datos estructurados, sin importar como esten escritos.
+- Opcionalmente, usa la busqueda web de Claude para COTIZAR los repuestos
+  en Mercado Libre Argentina.
+- Completa la plantilla Excel virgen preservando logos, estilos y formulas.
+
+Requiere la variable de entorno ANTHROPIC_API_KEY (configurada en Render).
 """
 
+import os
 import re
-import time
+import json
 import zipfile
 import unicodedata
-import statistics
 from io import BytesIO
-from urllib.parse import quote
-from urllib.request import urlopen, Request
-import json
 
 from openpyxl import load_workbook
+import anthropic
+
+
+# Modelo de Claude a usar (Sonnet 4.6: buen equilibrio costo/calidad)
+MODELO_CLAUDE = "claude-sonnet-4-6"
 
 
 # ============================================================
@@ -40,16 +48,6 @@ def a_numero(valor):
     return int(s) if s else 0
 
 
-def normalizar_accion(raw):
-    """Normaliza la accion a CAMBIAR o REPARAR. 'Pintar' -> 'REPARAR'."""
-    a = normalizar(raw)
-    if a in ("CAMBIAR", "CAMBIO", "SUSTITUIR", "C"):
-        return "CAMBIAR"
-    if a in ("REPARAR", "REPARACION", "PINTAR", "PINTURA", "R", "P"):
-        return "REPARAR"
-    return a
-
-
 # ============================================================
 #  ESTRUCTURA DE DATOS
 # ============================================================
@@ -72,385 +70,142 @@ def data_vacia():
 
 
 # ============================================================
-#  PARSER DE TEXTO LIBRE
+#  CEREBRO: ENTENDER EL PERITAJE CON LA API DE CLAUDE
 # ============================================================
 
-# Etiquetas reconocidas: (variantes, campo)
-LABEL_DEFS = [
-    (["NRO STRO", "NRO SINIESTRO", "NUMERO DE SINIESTRO", "N STRO", "N SINIESTRO"], "numeroSiniestro"),
-    (["FECHA STRO", "FECHA DE SINIESTRO", "FECHA SINIESTRO", "F STRO", "F SINIESTRO"], "fechaSiniestro"),
-    (["FECHA INSPECCION", "FECHA DE INSPECCION", "FECHA IP", "F IP"], "fechaInspeccion"),
-    (["ASEGURADO", "APELLIDO Y NOMBRE"], "asegurado"),
-    (["VEHICULO"], "__vehiculo"),
-    (["MARCA"], "marca"),
-    (["MODELO"], "modelo"),
-    (["ANO", "ANIO"], "anio"),
-    (["PATENTE", "DOMINIO"], "dominio"),
-    (["CHASIS", "N CHASIS", "NRO CHASIS"], "chasis"),
-    (["KILOMETRAJE", "KM"], "kilometraje"),
-    (["SUMA ASEG", "SUMA ASEGURADA", "S ASEG"], "sumaAsegurada"),
-    (["FRANQUICIA A DEDUCIR", "FRANQUICIA"], "franquicia"),
-]
+# Instrucciones para Claude: como perito, que datos extraer y en que formato.
+_PROMPT_SISTEMA_PARSEO = """Sos un perito tasador de seguros automotores con \
+experiencia. Recibis el texto libre de una peritacion (puede venir \
+desordenado, con abreviaturas, datos de poliza mezclados, etc.) y tu tarea \
+es EXTRAER los datos y devolverlos en formato JSON estricto.
 
-# Etiquetas que se ignoran pero sirven de delimitador.
-# Todas estas lineas NO deben entrar como observaciones.
-IGNORE_LABELS = [
-    "FECHA CARGA", "SELLO", "POLIZA", "PROP", "STROS", "PRODUCTOR", "DOM.PAS",
-    "CP", "CATEGORIA IVA", "AG. RET CUIT", "CUIT", "NRO JUB", "TIPO JUBILACION",
-    "ING BRUTOS", "NRO IB", "JURISDICCION PAS", "SER. SOCIAL", "DOMICILIO",
-    "ITEM", "USO", "MOTOR", "DIRECCION", "DIR", "LOCALIDAD",
-]
+Reglas de interpretacion:
+- Las piezas bajo "SUSTITUIR" o "CAMBIAR" tienen accion "CAMBIAR".
+- Las piezas bajo "PINTAR" o "REPARAR" tienen accion "REPARAR".
+- Mano de obra: interpretar todas las modalidades de escritura. Ejemplos:
+  "7 panos", "pint 7", "7p" -> pintura = 7.
+  "chapa 3", "3 dias", "3d", "3 jornadas" -> chapa = 3.
+  "12 hs mecanica", "mecanica 12" -> mecanica = 12.
+- "carga de gas", "varios", "service" -> sumar al campo manoObra.varios.
+- El numero de siniestro puede venir solo (un numero suelto) o con etiqueta.
+- La fecha de inspeccion puede venir como "fecha ip 16/05/26", "16-05-26", \
+etc., en cualquier parte del texto.
+- La suma asegurada es solo el numero, sin texto pegado.
+- Los datos del taller / lugar de inspeccion (nombre, direccion, localidad) \
+pueden aparecer en cualquier parte; extraelos si los encontras.
+- Las observaciones son la descripcion en prosa del perito (ej: "visto en \
+domicilio particular..."), NO los datos de poliza, productor, vigencia, etc.
+- Si un dato no aparece, dejalo como cadena vacia "" o 0 segun corresponda.
+
+Devolve UNICAMENTE un objeto JSON valido, sin texto antes ni despues, sin \
+backticks, con esta estructura exacta:
+{
+  "numeroSiniestro": "",
+  "fechaSiniestro": "",
+  "fechaInspeccion": "",
+  "asegurado": "",
+  "marca": "",
+  "modelo": "",
+  "anio": "",
+  "dominio": "",
+  "chasis": "",
+  "kilometraje": "",
+  "sumaAsegurada": "",
+  "tallerNombre": "",
+  "tallerDireccion": "",
+  "tallerLocalidad": "",
+  "franquicia": 0,
+  "manoObra": {"pintura": 0, "chapa": 0, "mecanica": 0,
+               "tapiceria": 0, "varios": 0},
+  "danos": [{"accion": "CAMBIAR", "pieza": "nombre de la pieza"}],
+  "observaciones": ""
+}"""
 
 
-def _construir_patron_labels():
-    todas = []
-    for variantes, _ in LABEL_DEFS:
-        todas.extend(variantes)
-    todas.extend(IGNORE_LABELS)
-    # Ordenar por longitud descendente para que las mas largas matcheen primero
-    todas.sort(key=len, reverse=True)
-    return "|".join(re.escape(x) for x in todas)
+def _cliente_claude():
+    """Crea el cliente de la API de Claude. Lee la key del entorno."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError(
+            "Falta la variable de entorno ANTHROPIC_API_KEY. "
+            "Configurala en Render (Environment).")
+    return anthropic.Anthropic(api_key=api_key)
 
 
-def _limpiar_valor(valor):
-    """
-    Limpia un valor de campo: quita marcadores // | y palabras-seccion
-    pegadas. NO corta la coma entre digitos (ej. '1,8' es decimal).
-    Ej: '8900000 // SUSTITUIR:' -> '8900000'
-    """
-    if not valor:
-        return ""
-    valor = re.split(
-        r"\s*(?://|\|)\s*|"
-        r"\s*,\s+|"
-        r"\s+(?=(?:SUSTITUIR|CAMBIAR|PINTAR|REPARAR|REEMPLAZAR|"
-        r"OBSERVACIONES?|MANO DE OBRA)\s*:?\s*$)",
-        valor, maxsplit=1, flags=re.IGNORECASE)[0]
-    return valor.strip()
+def _extraer_json(texto):
+    """Extrae el primer objeto JSON de un texto, tolerando backticks."""
+    t = texto.strip()
+    # Quitar fences ```json ... ```
+    t = re.sub(r"^```(?:json)?\s*|\s*```$", "", t,
+               flags=re.IGNORECASE | re.MULTILINE)
+    # Tomar desde la primera { hasta la ultima }
+    ini = t.find("{")
+    fin = t.rfind("}")
+    if ini >= 0 and fin > ini:
+        t = t[ini:fin + 1]
+    return json.loads(t)
 
 
 def parsear_texto(texto):
-    """Parsea el texto libre de la peritacion y devuelve el dict de datos."""
+    """
+    Entiende el texto libre de la peritacion usando la API de Claude
+    y devuelve el dict de datos estructurado.
+
+    Si Claude falla o el texto esta vacio, devuelve data_vacia().
+    """
     data = data_vacia()
     if not texto or not texto.strip():
         return data
 
-    labels_pattern = _construir_patron_labels()
-    lineas = texto.split("\n")
-    lineas_norm = [normalizar(l) for l in lineas]
+    cliente = _cliente_claude()
+    respuesta = cliente.messages.create(
+        model=MODELO_CLAUDE,
+        max_tokens=4000,
+        system=_PROMPT_SISTEMA_PARSEO,
+        messages=[{
+            "role": "user",
+            "content": "Texto de la peritacion:\n\n" + texto,
+        }],
+    )
 
-    # Guarda que lineas tienen una etiqueta de cabecera (para excluirlas
-    # de las observaciones implicitas mas adelante).
-    lineas_con_campo = set()
+    # Juntar el texto devuelto por Claude
+    salida = ""
+    for bloque in respuesta.content:
+        if getattr(bloque, "type", None) == "text":
+            salida += bloque.text
 
-    # ---- PASO 1: extraer campos de cabecera ----
-    for idx, linea_norm in enumerate(lineas_norm):
-        if not linea_norm.strip():
-            continue
-        linea_orig = lineas[idx]
+    try:
+        parsed = _extraer_json(salida)
+    except Exception:
+        # Si Claude no devolvio JSON valido, no se pierde el informe:
+        # se devuelve data vacia y el resto del flujo sigue.
+        return data
 
-        patron = (r"(" + labels_pattern + r")\s*[:=]\s*(.*?)"
-                  r"(?=\s+(?:" + labels_pattern + r")\s*[:=]|$)")
-        for m in re.finditer(patron, linea_norm, re.IGNORECASE):
-            lineas_con_campo.add(idx)
-            label = m.group(1).strip()
-            valor_raw = m.group(2)
-            inicio = m.start(2)
-            valor = linea_orig[inicio:inicio + len(valor_raw)].strip()
-            valor = _limpiar_valor(valor)
-            if not valor:
-                continue
+    # Volcar los campos al dict, con valores por defecto seguros
+    for campo in ("numeroSiniestro", "fechaSiniestro", "fechaInspeccion",
+                  "asegurado", "marca", "modelo", "anio", "dominio",
+                  "chasis", "kilometraje", "sumaAsegurada",
+                  "tallerNombre", "tallerDireccion", "tallerLocalidad",
+                  "observaciones"):
+        v = parsed.get(campo, "")
+        data[campo] = str(v).strip() if v is not None else ""
 
-            # Buscar el campo correspondiente
-            campo = None
-            for variantes, f in LABEL_DEFS:
-                if any(normalizar(v) == normalizar(label) for v in variantes):
-                    campo = f
-                    break
-            if campo is None:
-                continue
+    data["franquicia"] = a_numero(parsed.get("franquicia", 0))
 
-            if campo == "__vehiculo":
-                # VEHICULO: CHEVROLET MERIVA GLS 1,8 -> marca + modelo
-                if not data["marca"] and not data["modelo"]:
-                    partes = valor.split()
-                    data["marca"] = partes[0] if partes else ""
-                    data["modelo"] = " ".join(partes[1:])
-            elif campo == "franquicia":
-                if not data["franquicia"]:
-                    data["franquicia"] = a_numero(valor)
-            else:
-                if not data[campo]:
-                    data[campo] = valor
+    mo = parsed.get("manoObra", {}) or {}
+    for k in ("pintura", "chapa", "mecanica", "tapiceria", "varios"):
+        data["manoObra"][k] = a_numero(mo.get(k, 0))
 
-    # ---- PASO 1b: nro de siniestro sin etiqueta ----
-    # En algunas peritaciones el nro de siniestro aparece solo, como numero
-    # suelto en una de las primeras lineas (ej. una linea que dice "6").
-    if not data["numeroSiniestro"]:
-        for linea in lineas[:5]:
-            l = linea.strip()
-            if re.fullmatch(r"\d{1,8}", l):
-                data["numeroSiniestro"] = l
-                break
-
-    # ---- PASO 2: secciones de danos ----
-    # Las palabras SUSTITUIR:/PINTAR: pueden estar en su propia linea
-    # O al final de otra linea (ej: "SUMA ASEG: 8900000 // SUSTITUIR:").
-    sustituir_idx = -1
-    pintar_idx = -1
-    for i, ln in enumerate(lineas_norm):
-        ln = ln.strip()
-        if sustituir_idx < 0 and re.search(
-                r"(?:^|[\s/|:])(SUSTITUIR|REEMPLAZAR)\s*:?\s*$", ln):
-            sustituir_idx = i
-        if pintar_idx < 0 and re.search(
-                r"(?:^|[\s/|:])(PINTAR)\s*:?\s*$", ln):
-            pintar_idx = i
-
-    def es_mano_obra(linea):
-        return re.match(
-            r"^\d+(?:[.,]\d+)?\s*(?:HS\s+|HORAS?\s+)?"
-            r"(PA[NN]OS?|CHAPA|MECANICA|TAPICERIA|PINTURA)",
-            normalizar(linea),
-        )
-
-    def es_varios(linea):
-        return re.match(
-            r"^(CARGA DE GAS|VARIOS|OTROS|SERVICE|ADICIONAL)\s*\$?\s*[\d.,]+",
-            normalizar(linea),
-        )
-
-    def es_campo(linea):
-        return re.search(
-            r"(NRO STRO|FECHA STRO|FECHA DE|FECHA IP|PATENTE|VEHICULO|CHASIS|"
-            r"SUMA ASEG|ASEGURADO|MARCA|MODELO|ANO|KILOMETRAJE|DOMINIO|TALLER|"
-            r"FRANQUICIA|LOCALIDAD|DIRECCION|POLIZA|PRODUCTOR|CUIT|ITEM|USO|"
-            r"MOTOR|DOMICILIO|CP|CATEGORIA IVA|NRO JUB|TIPO JUBILACION|"
-            r"ING BRUTOS|NRO IB|JURISDICCION|SER. SOCIAL|PROP|STROS|"
-            r"DOM.PAS|AG. RET)\s*[:=]",
-            normalizar(linea),
-        )
-
-    def es_seccion(linea):
-        ln = normalizar(linea).strip()
-        return re.search(
-            r"(?:^|[\s/|:])(SUSTITUIR|CAMBIAR|PINTAR|REPARAR|OBSERVACIONES|OBS|"
-            r"MANO DE OBRA|COTIZACION|REEMPLAZAR)\s*:?\s*$",
-            ln,
-        )
-
-    def procesar_bloque_danos(inicio, accion):
-        """Lee piezas desde 'inicio' hasta que aparece otra seccion/campo/MO."""
-        for i in range(inicio + 1, len(lineas)):
-            linea = lineas[i].strip()
-            if not linea:
-                continue
-            if es_seccion(linea):
-                break
-            if es_mano_obra(linea) or es_varios(linea):
-                break
-            if es_campo(linea):
-                break
-            # Es una pieza. Puede tener precio: "Pieza - 12345" o "Pieza $12345"
-            m_precio = re.match(r"^(.+?)\s*[-|$]\s*\$?\s*([\d.,]+)\s*$", linea)
-            if m_precio:
-                pieza = m_precio.group(1).strip()
-                precio = a_numero(m_precio.group(2))
-            else:
-                pieza = linea
-                precio = 0
-            data["danos"].append({
-                "accion": accion,
-                "pieza": pieza,
-                "precio": precio if accion == "CAMBIAR" else 0,
-            })
-
-    if sustituir_idx >= 0:
-        procesar_bloque_danos(sustituir_idx, "CAMBIAR")
-    if pintar_idx >= 0:
-        procesar_bloque_danos(pintar_idx, "REPARAR")
-
-    # ---- PASO 3: mano de obra ----
-    for linea in lineas:
-        l = linea.strip()
-        if not l:
-            continue
-        m = re.match(
-            r"^(\d+(?:[.,]\d+)?)\s*(?:HS\s+|HORAS?\s+)?"
-            r"(PA[NN]OS?|CHAPA|MECANICA|TAPICERIA|PINTURA)"
-            r"(?:\s*X\s*\$?\s*([\d.,]+))?",
-            normalizar(l),
-        )
-        if m:
-            cant = a_numero(m.group(1))
-            concepto = m.group(2)
-            valor = a_numero(m.group(3)) if m.group(3) else 0
-            if "PAN" in concepto or concepto == "PINTURA":
-                data["manoObra"]["pintura"] = cant
-                if valor:
-                    data["manoObra"]["pinturaValor"] = valor
-            elif concepto == "CHAPA":
-                data["manoObra"]["chapa"] = cant
-                if valor:
-                    data["manoObra"]["chapaValor"] = valor
-            elif concepto.startswith("MEC"):
-                data["manoObra"]["mecanica"] = cant
-                if valor:
-                    data["manoObra"]["mecanicaValor"] = valor
-            elif concepto.startswith("TAPIC"):
-                data["manoObra"]["tapiceria"] = cant
-                if valor:
-                    data["manoObra"]["tapiceriaValor"] = valor
-            continue
-        # Varios / carga de gas
-        m_v = re.match(
-            r"^(CARGA DE GAS|VARIOS|OTROS|SERVICE|ADICIONAL)\s*\$?\s*([\d.,]+)",
-            normalizar(l),
-        )
-        if m_v:
-            data["manoObra"]["varios"] += a_numero(m_v.group(2))
-
-    # ---- PASO 4: observaciones ----
-    # Solo captura el bloque que sigue a la etiqueta "OBSERVACIONES".
-    # Si no hay etiqueta explicita, toma lineas largas en prosa que NO
-    # contengan ninguna etiqueta de campo (para no meter datos de poliza).
-    obs = []
-    capturando = False
-    indices_danos = set()  # lineas que son piezas, para excluirlas
-
-    # Marcar el rango de lineas de los bloques de danos
-    for marca_idx in (sustituir_idx, pintar_idx):
-        if marca_idx >= 0:
-            for i in range(marca_idx, len(lineas)):
-                ln = lineas[i].strip()
-                if i != marca_idx and (es_seccion(ln) or es_campo(ln)
-                                       or es_mano_obra(ln) or es_varios(ln)):
-                    break
-                indices_danos.add(i)
-
-    for idx, linea in enumerate(lineas):
-        l = linea.strip()
-        if not l:
-            continue
-        ln = normalizar(l)
-        if re.match(r"^(OBSERVACIONES?|OBS)\s*:?\s*$", ln):
-            capturando = True
-            continue
-        if capturando:
-            if es_seccion(l) or es_campo(l):
-                capturando = False
-            else:
-                obs.append(_limpiar_valor(l))
-                continue
-        # Observaciones implicitas: lineas largas en prosa, sin etiquetas,
-        # que no sean piezas ni mano de obra ni esten en lineas con campo.
-        if (len(l) > 60
-                and idx not in lineas_con_campo
-                and idx not in indices_danos
-                and not es_campo(l)
-                and not es_mano_obra(l)
-                and not es_varios(l)
-                and not re.match(r"^\d+\s", l)):
-            obs.append(_limpiar_valor(l))
-    data["observaciones"] = "\n".join(o for o in obs if o)
+    danos = []
+    for d in parsed.get("danos", []) or []:
+        accion = normalizar(d.get("accion", ""))
+        accion = "CAMBIAR" if accion not in ("REPARAR",) else "REPARAR"
+        pieza = str(d.get("pieza", "")).strip()
+        if pieza:
+            danos.append({"accion": accion, "pieza": pieza, "precio": 0})
+    data["danos"] = danos
 
     return data
-
-
-# ============================================================
-#  PARSER DE EXCEL DE PERITACION
-# ============================================================
-
-def parsear_excel_peritacion(file_bytes):
-    """Lee un Excel de peritacion y extrae los datos."""
-    data = data_vacia()
-    wb = load_workbook(BytesIO(file_bytes), data_only=True)
-
-    ws1 = wb.worksheets[0]
-    filas = list(ws1.iter_rows(values_only=True))
-    for fila in filas:
-        for i, celda in enumerate(fila):
-            etiqueta = normalizar(celda)
-            siguiente = ""
-            for j in range(i + 1, len(fila)):
-                if fila[j] not in (None, ""):
-                    siguiente = str(fila[j])
-                    break
-            if "NUMERO DE SINIESTRO" in etiqueta or "NRO SINIESTRO" in etiqueta:
-                data["numeroSiniestro"] = siguiente
-            elif "FECHA DE SINIESTRO" in etiqueta:
-                data["fechaSiniestro"] = siguiente
-            elif "FECHA DE INSPECC" in etiqueta:
-                data["fechaInspeccion"] = siguiente
-            elif "APELLIDO Y NOMBRE" in etiqueta:
-                data["asegurado"] = siguiente
-            elif etiqueta in ("MARCA:", "MARCA"):
-                data["marca"] = siguiente
-            elif etiqueta in ("MODELO:", "MODELO"):
-                data["modelo"] = siguiente
-            elif etiqueta in ("ANO:", "ANO"):
-                data["anio"] = siguiente
-            elif etiqueta in ("DOMINIO:", "DOMINIO", "PATENTE:", "PATENTE"):
-                data["dominio"] = siguiente
-            elif "CHASIS" in etiqueta:
-                data["chasis"] = siguiente
-            elif "KILOMETRA" in etiqueta:
-                data["kilometraje"] = siguiente
-            elif "SUMA ASEG" in etiqueta:
-                data["sumaAsegurada"] = siguiente
-
-    if len(wb.worksheets) > 1:
-        ws2 = wb.worksheets[1]
-        leyendo = False
-        for fila in ws2.iter_rows(values_only=True):
-            primera = normalizar(fila[0]) if fila and len(fila) > 0 else ""
-            segunda = normalizar(fila[1]) if fila and len(fila) > 1 else ""
-            if primera in ("ACCION", "ACCION:"):
-                leyendo = True
-                continue
-            if "TOTAL" in primera:
-                leyendo = False
-                continue
-            if leyendo:
-                accion = pieza = ""
-                precio = 0
-                if primera == "X":
-                    accion = "CAMBIAR"
-                    pieza = str(fila[1] or (fila[2] if len(fila) > 2 else "") or "").strip()
-                    precio = a_numero(fila[-1])
-                elif segunda == "X":
-                    accion = "REPARAR"
-                    pieza = str(fila[2] if len(fila) > 2 else "" or "").strip()
-                elif primera in ("CAMBIAR", "REPARAR", "PINTAR"):
-                    accion = normalizar_accion(primera)
-                    pieza = str(fila[1] or "").strip()
-                    precio = a_numero(fila[-1]) if accion == "CAMBIAR" else 0
-                if accion and pieza:
-                    data["danos"].append({"accion": accion, "pieza": pieza, "precio": precio})
-
-    return data
-
-
-def combinar_datos(data_excel, data_texto):
-    """Combina datos de Excel + texto. El texto pisa al Excel donde tenga valor."""
-    combinado = dict(data_excel)
-    campos = ["numeroSiniestro", "fechaSiniestro", "fechaInspeccion", "asegurado",
-              "marca", "modelo", "anio", "dominio", "chasis", "kilometraje",
-              "sumaAsegurada", "franquiciaVeh", "tallerNombre", "tallerDireccion",
-              "tallerLocalidad", "observaciones"]
-    for c in campos:
-        if data_texto.get(c):
-            combinado[c] = data_texto[c]
-    if data_texto.get("danos"):
-        combinado["danos"] = list(data_excel.get("danos", [])) + data_texto["danos"]
-    for k, v in data_texto.get("manoObra", {}).items():
-        if v:
-            combinado["manoObra"][k] = v
-    if data_texto.get("franquicia"):
-        combinado["franquicia"] = data_texto["franquicia"]
-    return combinado
-
-
 # ============================================================
 #  PRESERVACION DE IMAGENES (LOGOS)
 # ============================================================
@@ -883,121 +638,100 @@ def completar_plantilla(plantilla_bytes, data):
     return _reinyectar_imagenes(plantilla_bytes, generado)
 
 
+
 # ============================================================
-#  COTIZACION EN MERCADO LIBRE
+#  COTIZACION EN MERCADO LIBRE (via busqueda web de Claude)
 # ============================================================
 
-def _filtrar_outliers(precios):
-    """
-    Quita valores atipicos usando el rango intercuartilico (IQR).
-    Evita que un precio absurdamente bajo o alto ensucie el promedio.
-    """
-    if len(precios) < 4:
-        if not precios:
-            return []
-        med = statistics.median(precios)
-        return [p for p in precios if 0.2 * med <= p <= 3.0 * med]
+_PROMPT_SISTEMA_COTIZACION = """Sos un perito tasador. Te paso una lista de \
+repuestos de un vehiculo. Para cada repuesto, busca su precio en Mercado \
+Libre Argentina (mercadolibre.com.ar) usando la herramienta de busqueda web.
 
-    ordenados = sorted(precios)
-    n = len(ordenados)
-    q1 = ordenados[n // 4]
-    q3 = ordenados[(3 * n) // 4]
-    iqr = q3 - q1
-    limite_inf = q1 - 1.5 * iqr
-    limite_sup = q3 + 1.5 * iqr
-    filtrados = [p for p in ordenados if limite_inf <= p <= limite_sup]
-    return filtrados if filtrados else ordenados
+Para cada pieza:
+- Busca el repuesto especifico para la marca, modelo y anio indicados.
+- Mira varias publicaciones y calcula un PRECIO PROMEDIO razonable en pesos \
+argentinos, descartando valores claramente atipicos (demasiado baratos o \
+caros, accesorios que no corresponden, kits, etc.).
+- Si no encontras un precio confiable para una pieza, poné 0.
 
-
-def cotizar_pieza(pieza, marca="", modelo=""):
-    """
-    Busca una pieza en Mercado Libre Argentina y devuelve un precio promedio
-    limpio (sin valores atipicos).
-    """
-    resultado = {
-        "pieza": pieza, "query": "", "precio_sugerido": 0,
-        "cantidad_resultados": 0, "cantidad_usados": 0,
-        "rango": (0, 0), "error": None,
-    }
-
-    partes = [pieza]
-    if marca:
-        partes.append(marca)
-    if modelo:
-        partes.append(modelo.split()[0])
-    query = " ".join(partes).strip()
-    resultado["query"] = query
-
-    url = ("https://api.mercadolibre.com/sites/MLA/search"
-           "?q=" + quote(query) + "&condition=new&limit=30")
-
-    try:
-        req = Request(url, headers={"User-Agent": "InformeTasacion/1.0"})
-        with urlopen(req, timeout=12) as resp:
-            datos = json.loads(resp.read().decode("utf-8"))
-
-        items = datos.get("results", [])
-        precios = [
-            it["price"] for it in items
-            if it.get("currency_id") == "ARS" and it.get("price", 0) > 0
-        ]
-        resultado["cantidad_resultados"] = len(precios)
-
-        if not precios:
-            resultado["error"] = "Sin resultados"
-            return resultado
-
-        precios_limpios = _filtrar_outliers(precios)
-        if not precios_limpios:
-            resultado["error"] = "Sin precios validos tras filtrar"
-            return resultado
-
-        promedio = int(round(sum(precios_limpios) / len(precios_limpios)))
-        resultado["precio_sugerido"] = promedio
-        resultado["cantidad_usados"] = len(precios_limpios)
-        resultado["rango"] = (min(precios_limpios), max(precios_limpios))
-
-    except Exception as e:
-        resultado["error"] = str(e)
-
-    return resultado
+Devolve UNICAMENTE un objeto JSON valido, sin texto antes ni despues, sin \
+backticks, con esta estructura:
+{
+  "cotizaciones": [
+    {"pieza": "nombre exacto de la pieza", "precio": 12345}
+  ]
+}
+El campo "pieza" debe coincidir EXACTAMENTE con el nombre que te pase."""
 
 
 def cotizar_danos(data, solo_cambiar=True):
     """
-    Cotiza todas las piezas a CAMBIAR de un informe.
-    Modifica data["danos"] cargando el precio sugerido en cada pieza.
+    Cotiza las piezas a CAMBIAR usando la busqueda web de Claude en
+    Mercado Libre Argentina. Modifica data["danos"] cargando el precio.
     Devuelve una lista con el detalle de cada cotizacion.
     """
-    detalle = []
+    # Piezas a cotizar (solo las CAMBIAR sin precio cargado)
+    a_cotizar = [
+        d for d in data["danos"]
+        if (not solo_cambiar or d["accion"] == "CAMBIAR")
+        and not d.get("precio", 0)
+    ]
+    if not a_cotizar:
+        return []
+
     marca = data.get("marca", "")
     modelo = data.get("modelo", "")
+    anio = data.get("anio", "")
 
-    for dano in data["danos"]:
-        if solo_cambiar and dano["accion"] != "CAMBIAR":
-            continue
-        if dano.get("precio", 0) > 0:
-            detalle.append({
-                "pieza": dano["pieza"],
-                "precio_sugerido": dano["precio"],
-                "fuente": "cargado manualmente",
-            })
-            continue
+    lista = "\n".join("- " + d["pieza"] for d in a_cotizar)
+    pedido = (
+        "Vehiculo: %s %s %s\n\n"
+        "Repuestos a cotizar:\n%s" % (marca, modelo, anio, lista))
 
-        cot = cotizar_pieza(dano["pieza"], marca, modelo)
-        if cot["precio_sugerido"] > 0:
-            dano["precio"] = cot["precio_sugerido"]
+    cliente = _cliente_claude()
+    respuesta = cliente.messages.create(
+        model=MODELO_CLAUDE,
+        max_tokens=4000,
+        system=_PROMPT_SISTEMA_COTIZACION,
+        messages=[{"role": "user", "content": pedido}],
+        tools=[{
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": max(5, len(a_cotizar) * 2),
+            "user_location": {
+                "type": "approximate",
+                "country": "AR",
+            },
+        }],
+    )
+
+    salida = ""
+    for bloque in respuesta.content:
+        if getattr(bloque, "type", None) == "text":
+            salida += bloque.text
+
+    try:
+        parsed = _extraer_json(salida)
+        cotizaciones = parsed.get("cotizaciones", []) or []
+    except Exception:
+        cotizaciones = []
+
+    # Mapear precio por nombre de pieza (normalizado para tolerar variaciones)
+    precios = {}
+    for c in cotizaciones:
+        nombre = normalizar(c.get("pieza", ""))
+        precios[nombre] = a_numero(c.get("precio", 0))
+
+    detalle = []
+    for d in a_cotizar:
+        precio = precios.get(normalizar(d["pieza"]), 0)
+        if precio > 0:
+            d["precio"] = precio
         detalle.append({
-            "pieza": dano["pieza"],
-            "precio_sugerido": cot["precio_sugerido"],
-            "cantidad_resultados": cot["cantidad_resultados"],
-            "cantidad_usados": cot["cantidad_usados"],
-            "rango": cot["rango"],
-            "fuente": "Mercado Libre" if cot["precio_sugerido"] > 0 else "sin cotizacion",
-            "error": cot["error"],
+            "pieza": d["pieza"],
+            "precio_sugerido": precio,
+            "fuente": "Mercado Libre" if precio > 0 else "sin cotizacion",
         })
-        time.sleep(0.25)
-
     return detalle
 
 
@@ -1010,18 +744,21 @@ def procesar(plantilla_bytes, texto_peritacion="", excel_peritacion_bytes=None,
     """
     Funcion principal: recibe la plantilla y la peritacion,
     devuelve (informe_bytes, data, detalle_cotizacion).
-    """
-    data_texto = parsear_texto(texto_peritacion) if texto_peritacion else data_vacia()
 
-    if excel_peritacion_bytes:
-        data_excel = parsear_excel_peritacion(excel_peritacion_bytes)
-        data = combinar_datos(data_excel, data_texto)
-    else:
-        data = data_texto
+    - texto_peritacion: texto libre de la peritacion (lo entiende Claude).
+    - excel_peritacion_bytes: se acepta por compatibilidad; si viene, su
+      texto se ignora (el flujo principal es por texto). Reservado.
+    - cotizar: si True, cotiza los repuestos en Mercado Libre via Claude.
+    """
+    data = parsear_texto(texto_peritacion) if texto_peritacion else data_vacia()
 
     detalle_cotizacion = []
-    if cotizar:
-        detalle_cotizacion = cotizar_danos(data)
+    if cotizar and data.get("danos"):
+        try:
+            detalle_cotizacion = cotizar_danos(data)
+        except Exception as e:
+            # Si la cotizacion falla, el informe igual se genera (sin precios).
+            detalle_cotizacion = [{"error": str(e)}]
 
     informe_bytes = completar_plantilla(plantilla_bytes, data)
     return informe_bytes, data, detalle_cotizacion
