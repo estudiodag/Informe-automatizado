@@ -547,6 +547,58 @@ def completar_plantilla(plantilla_bytes, data):
         if pos is not None:
             _escribir(ws1, pos[0], pos[1], valor)
 
+    # ---- Datos del taller / lugar de inspeccion ----
+    # Se busca primero la fila de la seccion "DATOS DEL TALLER" y, a
+    # partir de ahi, las etiquetas NOMBRE/DIRECCION/LOCALIDAD. Asi no se
+    # confunde "NOMBRE" con el "APELLIDO Y NOMBRE" del asegurado.
+    fila_taller = None
+    for fila_celdas in ws1.iter_rows():
+        for celda in fila_celdas:
+            v = normalizar(celda.value)
+            if "DATOS DEL TALLER" in v or "LUGAR DE INSPECCION" in v:
+                fila_taller = celda.row
+                break
+        if fila_taller:
+            break
+
+    if fila_taller is not None:
+        taller_map = [
+            (["NOMBRE"], data.get("tallerNombre", "")),
+            (["DIRECCION"], data.get("tallerDireccion", "")),
+            (["LOCALIDAD"], data.get("tallerLocalidad", "")),
+        ]
+        for etiquetas, valor in taller_map:
+            if not valor:
+                continue
+            # Buscar la etiqueta en las filas de la seccion del taller.
+            # El valor va en la primera celda vacia a la DERECHA de la
+            # etiqueta (saltando el ancho de celdas combinadas).
+            for fila_celdas in ws1.iter_rows(min_row=fila_taller,
+                                             max_row=fila_taller + 6):
+                encontrada = False
+                for celda in fila_celdas:
+                    et_ok = any(_es_celda_etiqueta(celda.value, et)
+                                for et in etiquetas)
+                    if not et_ok:
+                        continue
+                    # Punto de partida: columna siguiente al merge de
+                    # la etiqueta (o a la celda si no esta combinada).
+                    rango = _rango_de(ws1, celda.row, celda.column)
+                    col_ini = (rango.max_col + 1) if rango \
+                        else (celda.column + 1)
+                    destino = None
+                    for c in range(col_ini, col_ini + 9):
+                        if _valor_celda(ws1, celda.row, c) in (None, ""):
+                            destino = c
+                            break
+                    if destino is None:
+                        destino = col_ini
+                    _escribir(ws1, celda.row, destino, valor)
+                    encontrada = True
+                    break
+                if encontrada:
+                    break
+
     # Franquicia del vehiculo (1ra ocurrencia de "FRANQUICIA").
     # Regla: si no hay valor, se escribe 0 (no se deja vacio).
     franq_veh = a_numero(data.get("franquiciaVeh")) if data.get("franquiciaVeh") else 0
@@ -596,6 +648,29 @@ def completar_plantilla(plantilla_bytes, data):
     if len(hojas) > 2:
         ws3 = hojas[2]
         mo = data["manoObra"]
+
+        # ---- Total Repuestos ----
+        # La celda "Total Repuestos" de la Hoja3 NO es una formula: hay
+        # que escribir la suma de los precios de las piezas a CAMBIAR.
+        total_repuestos = sum(
+            (d.get("precio", 0) or 0)
+            for d in data["danos"]
+            if d["accion"] == "CAMBIAR"
+        )
+        for fila_celdas in ws3.iter_rows():
+            encontrada = False
+            for celda in fila_celdas:
+                if "TOTAL REPUESTOS" in normalizar(celda.value):
+                    # El valor va en la celda de importe de la misma
+                    # fila (a la derecha de la etiqueta).
+                    rango = _rango_de(ws3, celda.row, celda.column)
+                    col_valor = (rango.max_col + 1) if rango \
+                        else (celda.column + 1)
+                    _escribir(ws3, celda.row, col_valor, total_repuestos)
+                    encontrada = True
+                    break
+            if encontrada:
+                break
 
         def _buscar_cols_cant_vu(fila_concepto):
             """Busca las columnas CANT. y V. UNITARIO mirando filas de arriba."""
