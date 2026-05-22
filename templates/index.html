@@ -65,16 +65,13 @@
     display: flex; align-items: center; gap: 8px; }
   .optional { color: #94a3b8; font-weight: 400; font-size: 12px; }
 
-  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-  @media (max-width: 680px) { .grid2 { grid-template-columns: 1fr; } }
-
   .btn {
     width: 100%; background: #f97316; color: white; border: none;
     padding: 14px; border-radius: 10px; font-size: 16px;
     font-weight: 600; cursor: pointer; transition: background 0.2s;
     margin-top: 20px;
   }
-  .btn:hover { background: # ea580c; }
+  .btn:hover { background: #ea580c; }
   .btn:disabled { background: #cbd5e1; cursor: not-allowed; }
 
   .info-box {
@@ -86,17 +83,9 @@
 
   .cotizar-box {
     background: #eff6ff; border: 1px solid #bfdbfe;
-    border-radius: 8px; padding: 14px; margin-top: 16px;
+    border-radius: 8px; padding: 12px 14px; font-size: 13px;
+    color: #1e3a8a; margin-top: 16px;
   }
-  .cotizar-label {
-    display: flex; gap: 12px; cursor: pointer; align-items: flex-start;
-  }
-  .cotizar-label input[type="checkbox"] {
-    width: 20px; height: 20px; margin-top: 2px;
-    cursor: pointer; flex-shrink: 0; accent-color: #2563eb;
-  }
-  .cotizar-titulo { font-weight: 600; font-size: 14px; color: #1e40af; }
-  .cotizar-desc { font-size: 13px; color: #1e3a8a; margin-top: 4px; }
 
   .error-box {
     background: #fef2f2; border: 1px solid #fecaca;
@@ -153,74 +142,63 @@
   <!-- PASO 2: Peritación -->
   <div class="card">
     <h2><span class="step-num">2</span>Cargá la peritación</h2>
-    <p class="desc">Pegá el texto del peritaje y/o subí un Excel con los datos.</p>
+    <p class="desc">Pegá el texto del peritaje. El sistema lo interpreta con inteligencia.</p>
 
-    <div class="grid2">
-      <div>
-        <div class="label">
-          <span style="background:#f97316;color:white;width:22px;height:22px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:12px;">A</span>
-          Pegar texto <span class="optional">(opcional)</span>
-        </div>
-        <textarea id="texto" placeholder="NRO STRO: 249874 FECHA STRO: 26/03/2026
-ASEGURADO: PEREZ JUAN
-PATENTE: ABC123 ANO: 2020
-VEHICULO: TOYOTA COROLLA XLI
-SUMA ASEG: 8900000
-
-SUSTITUIR:
-OPTICA DER.
-PARAGOLPE DEL.
-
-PINTAR
-CAPOT
-
-7 PAÑOS X $150000
-4 CHAPA X $140000
-12 HS MECANICA X $60000
-CARGA DE GAS $150000
-
-VISTO EN DOMICILIO. MANO DE OBRA ESTIMADA."></textarea>
-      </div>
-
-      <div>
-        <div class="label">
-          <span style="background:#f97316;color:white;width:22px;height:22px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:12px;">B</span>
-          Subir Excel <span class="optional">(opcional)</span>
-        </div>
-        <div class="dropzone" id="dz-excel" style="min-height:200px;display:flex;flex-direction:column;justify-content:center;"
-             onclick="document.getElementById('excel_perit').click()">
-          <div class="icon">📊</div>
-          <div class="title" id="excel-title">Subir Excel de peritación</div>
-          <div class="hint" id="excel-hint">Mismo formato o libre</div>
-        </div>
-        <input type="file" id="excel_perit" accept=".xlsx,.xls" style="display:none">
-      </div>
+    <div class="label">
+      <span style="background:#f97316;color:white;width:22px;height:22px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:12px;">A</span>
+      Texto del peritaje
     </div>
+    <textarea id="texto" placeholder="Pegá acá el peritaje tal como lo recibís.
+
+El sistema entiende el texto libre: piezas a sustituir/reparar,
+mano de obra, datos del vehículo, fechas, observaciones, etc."></textarea>
 
     <div class="info-box">
       <strong>📋 Reglas que aplica el sistema:</strong>
       <ul>
-        <li>Las piezas bajo "SUSTITUIR:" → <strong>CAMBIAR</strong>.</li>
-        <li>Las piezas bajo "PINTAR" → <strong>REPARAR</strong> (sin precio).</li>
-        <li>Mano de obra: formato <code>7 PAÑOS X $150000</code>.</li>
+        <li>Las piezas bajo "SUSTITUIR" → <strong>CAMBIAR</strong>.</li>
+        <li>Las piezas bajo "PINTAR" o "REPARAR" → <strong>REPARAR</strong> (sin precio).</li>
+        <li>Mano de obra: entiende paños, chapa, días, horas de mecánica, etc.</li>
         <li>Solo las piezas a CAMBIAR llevan precio.</li>
       </ul>
     </div>
+  </div>
 
-    <!-- Opción de cotización en Mercado Libre -->
+  <!-- PASO 3: Cotización de repuestos -->
+  <div class="card">
+    <h2><span class="step-num">3</span>Cotización de repuestos <span class="optional">(opcional)</span></h2>
+    <p class="desc">
+      Pegá la cotización o subí un archivo. Los precios se cargan en el informe
+      usando el valor con IVA. Si no cargás nada, los repuestos van en $0.
+    </p>
+
+    <div class="label">
+      <span style="background:#f97316;color:white;width:22px;height:22px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:12px;">A</span>
+      Pegar cotización <span class="optional">(opcional)</span>
+    </div>
+    <textarea id="cotizacion" style="min-height:160px;" placeholder="Pegá acá la cotización de repuestos.
+
+Ej:
+Repuesto              Precio s/IVA    Precio c/IVA
+Paragolpe delantero   $282.030        $341.256
+Capot                 $202.771        $245.353
+..."></textarea>
+
+    <div class="label" style="margin-top:16px;">
+      <span style="background:#f97316;color:white;width:22px;height:22px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:12px;">B</span>
+      O subir archivo de cotización <span class="optional">(opcional)</span>
+    </div>
+    <div class="dropzone" id="dz-cotiz" style="padding:24px;"
+         onclick="document.getElementById('cotiz_file').click()">
+      <div class="icon">📎</div>
+      <div class="title" id="cotiz-title">Subir cotización (.txt, .xlsx, .docx)</div>
+      <div class="hint" id="cotiz-hint">Click para seleccionar</div>
+    </div>
+    <input type="file" id="cotiz_file" accept=".txt,.xlsx,.xls,.docx" style="display:none">
+
     <div class="cotizar-box">
-      <label class="cotizar-label">
-        <input type="checkbox" id="cotizar">
-        <div>
-          <div class="cotizar-titulo">🔍 Cotizar repuestos en Mercado Libre</div>
-          <div class="cotizar-desc">
-            Si lo activás, el sistema busca el precio de cada pieza a CAMBIAR en
-            Mercado Libre Argentina y carga un promedio (descartando valores atípicos
-            que distorsionen el resultado). Si lo dejás sin marcar, el informe sale
-            con los precios que cargues vos.
-          </div>
-        </div>
-      </label>
+      Si no pegás ni subís ninguna cotización, el informe sale con todos
+      los repuestos en <strong>$0</strong> para que los completes a mano.
     </div>
 
     <div class="error-box" id="error-box"></div>
@@ -237,9 +215,9 @@ VISTO EN DOMICILIO. MANO DE OBRA ESTIMADA."></textarea>
 
 <script>
   let plantillaFile = null;
-  let excelPeritFile = null;
+  let cotizFile = null;
 
-  // ---- Manejo de subida de plantilla ----
+  // ---- Subida de plantilla ----
   document.getElementById('plantilla').addEventListener('change', function(e) {
     const f = e.target.files[0];
     if (!f) return;
@@ -249,14 +227,14 @@ VISTO EN DOMICILIO. MANO DE OBRA ESTIMADA."></textarea>
     document.getElementById('dz-plantilla').classList.add('filled');
   });
 
-  // ---- Manejo de subida de Excel de peritación ----
-  document.getElementById('excel_perit').addEventListener('change', function(e) {
+  // ---- Subida de archivo de cotización ----
+  document.getElementById('cotiz_file').addEventListener('change', function(e) {
     const f = e.target.files[0];
     if (!f) return;
-    excelPeritFile = f;
-    document.getElementById('excel-title').textContent = f.name;
-    document.getElementById('excel-hint').textContent = 'Click para reemplazar';
-    document.getElementById('dz-excel').classList.add('filled');
+    cotizFile = f;
+    document.getElementById('cotiz-title').textContent = f.name;
+    document.getElementById('cotiz-hint').textContent = 'Click para reemplazar';
+    document.getElementById('dz-cotiz').classList.add('filled');
   });
 
   // ---- Drag and drop ----
@@ -281,14 +259,14 @@ VISTO EN DOMICILIO. MANO DE OBRA ESTIMADA."></textarea>
     document.getElementById('plantilla-hint').textContent = 'Click para reemplazar';
     document.getElementById('dz-plantilla').classList.add('filled');
   });
-  setupDrop('dz-excel', function(f) {
-    excelPeritFile = f;
-    document.getElementById('excel-title').textContent = f.name;
-    document.getElementById('excel-hint').textContent = 'Click para reemplazar';
-    document.getElementById('dz-excel').classList.add('filled');
+  setupDrop('dz-cotiz', function(f) {
+    cotizFile = f;
+    document.getElementById('cotiz-title').textContent = f.name;
+    document.getElementById('cotiz-hint').textContent = 'Click para reemplazar';
+    document.getElementById('dz-cotiz').classList.add('filled');
   });
 
-  // ---- Mostrar mensajes ----
+  // ---- Mensajes ----
   function mostrarError(msg) {
     const box = document.getElementById('error-box');
     box.textContent = '⚠️ ' + msg;
@@ -315,26 +293,23 @@ VISTO EN DOMICILIO. MANO DE OBRA ESTIMADA."></textarea>
       return;
     }
     const texto = document.getElementById('texto').value.trim();
-    if (!texto && !excelPeritFile) {
-      mostrarError('Pegá el texto de la peritación o subí un Excel con los datos.');
+    if (!texto) {
+      mostrarError('Pegá el texto de la peritación.');
       return;
     }
 
     const btn = document.getElementById('btn-procesar');
-    const cotizar = document.getElementById('cotizar').checked;
     btn.disabled = true;
-    if (cotizar) {
-      btn.innerHTML = '<span class="spinner"></span>Cotizando en Mercado Libre... (puede tardar)';
-    } else {
-      btn.innerHTML = '<span class="spinner"></span>Generando informe...';
-    }
+    btn.innerHTML = '<span class="spinner"></span>Generando informe...';
 
     try {
+      const cotizacionTexto = document.getElementById('cotizacion').value.trim();
+
       const formData = new FormData();
       formData.append('plantilla', plantillaFile);
       formData.append('texto', texto);
-      if (excelPeritFile) formData.append('excel_perit', excelPeritFile);
-      if (cotizar) formData.append('cotizar', 'si');
+      if (cotizacionTexto) formData.append('cotizacion', cotizacionTexto);
+      if (cotizFile) formData.append('cotiz_file', cotizFile);
 
       const resp = await fetch('/procesar', {
         method: 'POST',
@@ -346,7 +321,6 @@ VISTO EN DOMICILIO. MANO DE OBRA ESTIMADA."></textarea>
         throw new Error(err.error || 'Error desconocido');
       }
 
-      // Descargar el archivo
       const blob = await resp.blob();
       const disposition = resp.headers.get('Content-Disposition') || '';
       let filename = 'Informe Tasacion Agrosalta - COMPLETO.xlsx';
