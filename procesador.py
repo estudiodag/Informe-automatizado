@@ -4,8 +4,6 @@ Motor de procesamiento de informes de tasacion.
 
 - Usa la API de Claude (Anthropic) para ENTENDER el peritaje en lenguaje
   libre y extraer los datos estructurados, sin importar como esten escritos.
-- Opcionalmente, usa la busqueda web de Claude para COTIZAR los repuestos
-  en Mercado Libre Argentina.
 - Completa la plantilla Excel virgen preservando logos, estilos y formulas.
 
 Requiere la variable de entorno ANTHROPIC_API_KEY (configurada en Render).
@@ -82,6 +80,24 @@ es EXTRAER los datos y devolverlos en formato JSON estricto.
 Reglas de interpretacion:
 - Las piezas bajo "SUSTITUIR" o "CAMBIAR" tienen accion "CAMBIAR".
 - Las piezas bajo "PINTAR" o "REPARAR" tienen accion "REPARAR".
+- PRECIOS DE REPUESTOS: el texto puede incluir, despues de una linea
+  "=== COTIZACION DE REPUESTOS ===", una tabla o lista de precios de
+  repuestos (con columnas tipo Repuesto, Precio s/IVA, Precio c/IVA,
+  etc.). Si esa cotizacion esta presente:
+  * Para cada pieza a CAMBIAR, asignale su precio usando SIEMPRE la
+    columna "Precio c/IVA" (el valor CON IVA).
+  * Emparejá cada repuesto de la cotizacion con la pieza del peritaje
+    aunque esten escritos distinto. Ejemplos: "PPE Del" del peritaje =
+    "Paragolpe delantero" de la cotizacion; "Felpa Bajo Capot" =
+    "Felpa / manta bajo capot"; "Optica Izq" = "Optica delantera
+    izquierda".
+  * El precio es solo el numero entero, sin signo $ ni puntos de miles.
+  * Si una pieza a CAMBIAR no aparece en la cotizacion, su precio es 0.
+- Tambien se acepta un precio escrito al lado de la pieza en el peritaje
+  (ej: "Capot $180000").
+- Si NO hay ninguna cotizacion, todas las piezas a CAMBIAR van con
+  precio 0.
+- Las piezas a REPARAR siempre llevan precio 0.
 - Mano de obra: interpretar todas las modalidades de escritura. Ejemplos:
   "7 panos", "pint 7", "7p" -> pintura = 7.
   "chapa 3", "3 dias", "3d", "3 jornadas" -> chapa = 3.
@@ -117,7 +133,7 @@ backticks, con esta estructura exacta:
   "franquicia": 0,
   "manoObra": {"pintura": 0, "chapa": 0, "mecanica": 0,
                "tapiceria": 0, "varios": 0},
-  "danos": [{"accion": "CAMBIAR", "pieza": "nombre de la pieza"}],
+  "danos": [{"accion": "CAMBIAR", "pieza": "nombre", "precio": 0}],
   "observaciones": ""
 }"""
 
@@ -201,8 +217,11 @@ def parsear_texto(texto):
         accion = normalizar(d.get("accion", ""))
         accion = "CAMBIAR" if accion not in ("REPARAR",) else "REPARAR"
         pieza = str(d.get("pieza", "")).strip()
+        # Solo las piezas a CAMBIAR llevan precio; las REPARAR van en 0.
+        precio = a_numero(d.get("precio", 0)) if accion == "CAMBIAR" else 0
         if pieza:
-            danos.append({"accion": accion, "pieza": pieza, "precio": 0})
+            danos.append({"accion": accion, "pieza": pieza,
+                          "precio": precio})
     data["danos"] = danos
 
     return data
@@ -640,102 +659,6 @@ def completar_plantilla(plantilla_bytes, data):
 
 
 # ============================================================
-#  COTIZACION EN MERCADO LIBRE (via busqueda web de Claude)
-# ============================================================
-
-_PROMPT_SISTEMA_COTIZACION = """Sos un perito tasador. Te paso una lista de \
-repuestos de un vehiculo. Para cada repuesto, busca su precio en Mercado \
-Libre Argentina (mercadolibre.com.ar) usando la herramienta de busqueda web.
-
-Para cada pieza:
-- Busca el repuesto especifico para la marca, modelo y anio indicados.
-- Mira varias publicaciones y calcula un PRECIO PROMEDIO razonable en pesos \
-argentinos, descartando valores claramente atipicos (demasiado baratos o \
-caros, accesorios que no corresponden, kits, etc.).
-- Si no encontras un precio confiable para una pieza, poné 0.
-
-Devolve UNICAMENTE un objeto JSON valido, sin texto antes ni despues, sin \
-backticks, con esta estructura:
-{
-  "cotizaciones": [
-    {"pieza": "nombre exacto de la pieza", "precio": 12345}
-  ]
-}
-El campo "pieza" debe coincidir EXACTAMENTE con el nombre que te pase."""
-
-
-def cotizar_danos(data, solo_cambiar=True):
-    """
-    Cotiza las piezas a CAMBIAR usando la busqueda web de Claude en
-    Mercado Libre Argentina. Modifica data["danos"] cargando el precio.
-    Devuelve una lista con el detalle de cada cotizacion.
-    """
-    # Piezas a cotizar (solo las CAMBIAR sin precio cargado)
-    a_cotizar = [
-        d for d in data["danos"]
-        if (not solo_cambiar or d["accion"] == "CAMBIAR")
-        and not d.get("precio", 0)
-    ]
-    if not a_cotizar:
-        return []
-
-    marca = data.get("marca", "")
-    modelo = data.get("modelo", "")
-    anio = data.get("anio", "")
-
-    lista = "\n".join("- " + d["pieza"] for d in a_cotizar)
-    pedido = (
-        "Vehiculo: %s %s %s\n\n"
-        "Repuestos a cotizar:\n%s" % (marca, modelo, anio, lista))
-
-    cliente = _cliente_claude()
-    respuesta = cliente.messages.create(
-        model=MODELO_CLAUDE,
-        max_tokens=4000,
-        system=_PROMPT_SISTEMA_COTIZACION,
-        messages=[{"role": "user", "content": pedido}],
-        tools=[{
-            "type": "web_search_20250305",
-            "name": "web_search",
-            "max_uses": max(5, len(a_cotizar) * 2),
-            "user_location": {
-                "type": "approximate",
-                "country": "AR",
-            },
-        }],
-    )
-
-    salida = ""
-    for bloque in respuesta.content:
-        if getattr(bloque, "type", None) == "text":
-            salida += bloque.text
-
-    try:
-        parsed = _extraer_json(salida)
-        cotizaciones = parsed.get("cotizaciones", []) or []
-    except Exception:
-        cotizaciones = []
-
-    # Mapear precio por nombre de pieza (normalizado para tolerar variaciones)
-    precios = {}
-    for c in cotizaciones:
-        nombre = normalizar(c.get("pieza", ""))
-        precios[nombre] = a_numero(c.get("precio", 0))
-
-    detalle = []
-    for d in a_cotizar:
-        precio = precios.get(normalizar(d["pieza"]), 0)
-        if precio > 0:
-            d["precio"] = precio
-        detalle.append({
-            "pieza": d["pieza"],
-            "precio_sugerido": precio,
-            "fuente": "Mercado Libre" if precio > 0 else "sin cotizacion",
-        })
-    return detalle
-
-
-# ============================================================
 #  FUNCION PRINCIPAL
 # ============================================================
 
@@ -746,19 +669,12 @@ def procesar(plantilla_bytes, texto_peritacion="", excel_peritacion_bytes=None,
     devuelve (informe_bytes, data, detalle_cotizacion).
 
     - texto_peritacion: texto libre de la peritacion (lo entiende Claude).
-    - excel_peritacion_bytes: se acepta por compatibilidad; si viene, su
-      texto se ignora (el flujo principal es por texto). Reservado.
-    - cotizar: si True, cotiza los repuestos en Mercado Libre via Claude.
+    - excel_peritacion_bytes: se acepta por compatibilidad; reservado.
+    - cotizar: parametro mantenido por compatibilidad. La cotizacion
+      automatica fue descartada; los precios se cargan manualmente.
+
+    detalle_cotizacion siempre se devuelve como lista vacia.
     """
     data = parsear_texto(texto_peritacion) if texto_peritacion else data_vacia()
-
-    detalle_cotizacion = []
-    if cotizar and data.get("danos"):
-        try:
-            detalle_cotizacion = cotizar_danos(data)
-        except Exception as e:
-            # Si la cotizacion falla, el informe igual se genera (sin precios).
-            detalle_cotizacion = [{"error": str(e)}]
-
     informe_bytes = completar_plantilla(plantilla_bytes, data)
-    return informe_bytes, data, detalle_cotizacion
+    return informe_bytes, data, []
