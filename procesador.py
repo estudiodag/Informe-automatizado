@@ -80,6 +80,35 @@ es EXTRAER los datos y devolverlos en formato JSON estricto.
 Reglas de interpretacion:
 - Las piezas bajo "SUSTITUIR" o "CAMBIAR" tienen accion "CAMBIAR".
 - Las piezas bajo "PINTAR" o "REPARAR" tienen accion "REPARAR".
+
+- PERITAJE DESDE EXCEL (GRILLA): si el texto incluye un bloque que
+  empieza con "=== PERITAJE DESDE EXCEL (GRILLA) ===", ese bloque es el
+  volcado de una planilla Excel de peritacion, celda por celda, con sus
+  coordenadas (ej: "A55=Paragolpe | B55=X | D55=95000"). Interpretala
+  asi:
+  * La planilla tiene una grilla de danos dividida en SECTORES. Cada
+    sector tiene un encabezado de texto (ej: "PARTE DELANTERA",
+    "PARTE TRASERA", "LADO IZQUIERDO", "LADO DERECHO", "PARTE INTERIOR",
+    "MOTOR", "CHASIS", "TREN TRASERO", "TREN DELANTERO", "OTROS").
+  * Cada sector tiene un par de columnas marcadas "A" y "B" en su fila
+    de encabezado, y una columna "Precio". Las piezas son los textos
+    que estan a la izquierda de esas columnas.
+  * Una "X" en la columna "A" del sector significa que esa pieza va a
+    CAMBIAR. Una "X" en la columna "B" significa REPARAR.
+  * Recorré TODA la grilla y detectá TODAS las "X", en todos los
+    sectores (las columnas A/B de cada sector estan en distintas
+    posiciones: pueden ser B/C, G/H, L/M, etc.).
+  * El nombre de cada pieza se arma combinando el SECTOR donde esta con
+    el texto de la fila, para que quede sin ambiguedad. Ejemplos:
+    "Paragolpe" en el sector "PARTE TRASERA" -> "Paragolpe trasero".
+    "Guardabarro der." en "PARTE TRASERA" -> "Guardabarro trasero
+    derecho". "Guardabarro der." en "PARTE DELANTERA" -> "Guardabarro
+    delantero derecho".
+  * IGNORÁ los precios que vengan en la columna "Precio" del Excel. Los
+    precios NO se toman del Excel del peritaje.
+  * Del Excel tambien extraé los datos del vehiculo, asegurado, taller,
+    mano de obra y observaciones si estan presentes.
+
 - PRECIOS DE REPUESTOS: el texto puede incluir, despues de una linea
   "=== COTIZACION DE REPUESTOS ===", una tabla o lista de precios de
   repuestos (con columnas tipo Repuesto, Precio s/IVA, Precio c/IVA,
@@ -105,7 +134,8 @@ Reglas de interpretacion:
 - "carga de gas", "varios", "service" -> sumar al campo manoObra.varios.
 - El numero de siniestro puede venir solo (un numero suelto) o con etiqueta.
 - La fecha de inspeccion puede venir como "fecha ip 16/05/26", "16-05-26", \
-etc., en cualquier parte del texto.
+etc., en cualquier parte del texto. En el Excel suele ser "Dia de
+Inspeccion"; si viene como numero serial de Excel, convertilo a fecha.
 - La suma asegurada es solo el numero, sin texto pegado.
 - Los datos del taller / lugar de inspeccion (nombre, direccion, localidad) \
 pueden aparecer en cualquier parte; extraelos si los encontras.
@@ -176,7 +206,7 @@ def parsear_texto(texto):
     cliente = _cliente_claude()
     respuesta = cliente.messages.create(
         model=MODELO_CLAUDE,
-        max_tokens=4000,
+        max_tokens=8000,
         system=_PROMPT_SISTEMA_PARSEO,
         messages=[{
             "role": "user",
