@@ -4,11 +4,11 @@ Servidor web Flask para el generador de informes de tasacion.
 
 Endpoints:
   GET  /            -> sirve la pagina web (index.html)
-  POST /procesar    -> recibe plantilla + peritacion, devuelve el informe completo
+  POST /procesar    -> recibe plantilla + peritacion + cotizacion (opcional),
+                       devuelve el informe completo
 """
 
 import os
-import zipfile
 from io import BytesIO
 from flask import Flask, request, send_file, render_template, jsonify
 
@@ -20,25 +20,62 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 
 
-def _diagnostico_plantilla(plantilla_bytes):
+# ============================================================
+#  LECTURA DE ARCHIVOS DE COTIZACION
+# ============================================================
+
+def _texto_de_archivo(archivo):
     """
-    Imprime en el log del servidor cuantas imagenes tiene la plantilla
-    que se acaba de recibir. Sirve para confirmar si el archivo subido
-    realmente trae los logos o no.
+    Extrae el texto de un archivo de cotizacion subido.
+    Soporta: .txt, .xlsx/.xls (Excel) y .docx (Word).
+    Devuelve el texto plano, o "" si no se pudo leer.
     """
-    try:
-        z = zipfile.ZipFile(BytesIO(plantilla_bytes))
-        media = [n for n in z.namelist() if n.startswith("xl/media/")]
-        drawings = [n for n in z.namelist()
-                    if n.startswith("xl/drawings/") and n.endswith(".xml")]
-        print("=" * 50)
-        print("DIAGNOSTICO PLANTILLA RECIBIDA:")
-        print("  Tamano:", len(plantilla_bytes), "bytes")
-        print("  Imagenes (xl/media):", len(media), media)
-        print("  Drawings:", len(drawings))
-        print("=" * 50)
-    except Exception as e:
-        print("DIAGNOSTICO: no se pudo leer la plantilla -", e)
+    if not archivo or archivo.filename == "":
+        return ""
+
+    nombre = archivo.filename.lower()
+    datos = archivo.read()
+
+    # --- Texto plano ---
+    if nombre.endswith(".txt"):
+        try:
+            return datos.decode("utf-8", errors="ignore")
+        except Exception:
+            return ""
+
+    # --- Excel ---
+    if nombre.endswith((".xlsx", ".xls")):
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(BytesIO(datos), data_only=True)
+            lineas = []
+            for ws in wb.worksheets:
+                for fila in ws.iter_rows(values_only=True):
+                    celdas = [str(c) for c in fila if c not in (None, "")]
+                    if celdas:
+                        lineas.append("\t".join(celdas))
+            return "\n".join(lineas)
+        except Exception:
+            return ""
+
+    # --- Word ---
+    if nombre.endswith(".docx"):
+        try:
+            from docx import Document
+            doc = Document(BytesIO(datos))
+            partes = [p.text for p in doc.paragraphs if p.text.strip()]
+            # Tambien las tablas del documento
+            for tabla in doc.tables:
+                for fila in tabla.rows:
+                    celdas = [c.text.strip() for c in fila.cells
+                              if c.text.strip()]
+                    if celdas:
+                        partes.append("\t".join(celdas))
+            return "\n".join(partes)
+        except Exception:
+            return ""
+
+    return ""
 
 
 @app.route("/")
@@ -51,9 +88,10 @@ def index():
 def procesar_informe():
     """
     Recibe:
-      - plantilla     (archivo .xlsx, obligatorio)
-      - texto         (texto libre de la peritacion, opcional)
-      - excel_perit   (archivo .xlsx de peritacion, opcional)
+      - plantilla    (archivo .xlsx, obligatorio)
+      - texto        (texto libre del peritaje, obligatorio)
+      - cotizacion   (texto de la cotizacion de repuestos, opcional)
+      - cotiz_file   (archivo de cotizacion .txt/.xlsx/.docx, opcional)
     Devuelve:
       - el archivo .xlsx completado para descargar
     """
@@ -71,50 +109,37 @@ def procesar_informe():
 
         plantilla_bytes = plantilla_file.read()
 
-        # --- DIAGNOSTICO: confirmar si la plantilla trae los logos ---
-        _diagnostico_plantilla(plantilla_bytes)
-
-        # --- Texto de la peritacion (opcional) ---
+        # --- Texto del peritaje ---
         texto = request.form.get("texto", "").strip()
+        if not texto:
+            return jsonify({"error": "Pega el texto de la peritacion"}), 400
 
-        # --- Excel de peritacion (opcional) ---
-        excel_perit_bytes = None
-        if "excel_perit" in request.files:
-            ef = request.files["excel_perit"]
-            if ef.filename != "" and ef.filename.lower().endswith((".xlsx", ".xls")):
-                excel_perit_bytes = ef.read()
+        # --- Cotizacion: puede venir como texto pegado y/o como archivo ---
+        cotizacion = request.form.get("cotizacion", "").strip()
 
-        # --- Opcion de cotizar en Mercado Libre ---
-        # El checkbox del frontend envia "si" cuando esta marcado.
-        cotizar = request.form.get("cotizar", "").lower() in ("si", "true", "on", "1")
-
-        # --- Validar que haya al menos una fuente de datos ---
-        if not texto and not excel_perit_bytes:
-            return jsonify({
-                "error": "Carga el texto de la peritacion o subi un Excel con los datos"
-            }), 400
+        if "cotiz_file" in request.files:
+            texto_archivo = _texto_de_archivo(request.files["cotiz_file"])
+            if texto_archivo:
+                # Si hay texto pegado Y archivo, se combinan ambos.
+                cotizacion = (cotizacion + "\n\n" + texto_archivo).strip()
 
         # --- Procesar ---
-        informe_bytes, data, detalle_cotizacion = procesar(
-            plantilla_bytes,
-            texto_peritacion=texto,
-            excel_peritacion_bytes=excel_perit_bytes,
-            cotizar=cotizar,
-        )
+        # La cotizacion se suma al texto del peritaje: el procesador la
+        # entiende y empareja los precios con las piezas a CAMBIAR.
+        texto_completo = texto
+        if cotizacion:
+            texto_completo += (
+                "\n\n=== COTIZACION DE REPUESTOS ===\n" + cotizacion)
 
-        # --- DIAGNOSTICO: confirmar si el informe generado tiene logos ---
-        try:
-            zo = zipfile.ZipFile(BytesIO(informe_bytes))
-            media_out = [n for n in zo.namelist() if n.startswith("xl/media/")]
-            print("DIAGNOSTICO INFORME GENERADO -> imagenes:", len(media_out))
-        except Exception as e:
-            print("DIAGNOSTICO INFORME: error -", e)
+        informe_bytes, data, _ = procesar(
+            plantilla_bytes,
+            texto_peritacion=texto_completo,
+        )
 
         # --- Nombre del archivo de salida ---
         nro = data.get("numeroSiniestro") or data.get("dominio") or "sin-numero"
         nombre = f"Informe Tasacion Agrosalta - COMPLETO - {nro}.xlsx"
 
-        # --- Devolver el archivo ---
         return send_file(
             BytesIO(informe_bytes),
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -123,7 +148,6 @@ def procesar_informe():
         )
 
     except Exception as e:
-        # Log del error en consola del servidor
         import traceback
         traceback.print_exc()
         return jsonify({"error": f"Error al procesar: {str(e)}"}), 500
@@ -135,6 +159,5 @@ def archivo_muy_grande(e):
 
 
 if __name__ == "__main__":
-    # Para desarrollo local. En produccion Render usa gunicorn (ver Procfile).
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
