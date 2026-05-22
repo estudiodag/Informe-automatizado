@@ -142,22 +142,35 @@
   <!-- PASO 2: Peritación -->
   <div class="card">
     <h2><span class="step-num">2</span>Cargá la peritación</h2>
-    <p class="desc">Pegá el texto del peritaje. El sistema lo interpreta con inteligencia.</p>
+    <p class="desc">Pegá el texto del peritaje o subí el Excel de peritación. El sistema lo interpreta con inteligencia.</p>
 
     <div class="label">
       <span style="background:#f97316;color:white;width:22px;height:22px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:12px;">A</span>
-      Texto del peritaje
+      Pegar texto del peritaje <span class="optional">(opcional)</span>
     </div>
     <textarea id="texto" placeholder="Pegá acá el peritaje tal como lo recibís.
 
 El sistema entiende el texto libre: piezas a sustituir/reparar,
 mano de obra, datos del vehículo, fechas, observaciones, etc."></textarea>
 
+    <div class="label" style="margin-top:16px;">
+      <span style="background:#f97316;color:white;width:22px;height:22px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:12px;">B</span>
+      O subir el Excel de peritación <span class="optional">(opcional)</span>
+    </div>
+    <div class="dropzone" id="dz-excel" style="padding:24px;"
+         onclick="document.getElementById('excel_perit').click()">
+      <div class="icon">📊</div>
+      <div class="title" id="excel-title">Subir Excel de peritación (.xls, .xlsx)</div>
+      <div class="hint" id="excel-hint">El sistema lee la grilla y detecta las marcas "X"</div>
+    </div>
+    <input type="file" id="excel_perit" accept=".xlsx,.xls" style="display:none">
+
     <div class="info-box">
       <strong>📋 Reglas que aplica el sistema:</strong>
       <ul>
         <li>Las piezas bajo "SUSTITUIR" → <strong>CAMBIAR</strong>.</li>
         <li>Las piezas bajo "PINTAR" o "REPARAR" → <strong>REPARAR</strong> (sin precio).</li>
+        <li>En el Excel: "X" en columna A → <strong>CAMBIAR</strong>, "X" en columna B → <strong>REPARAR</strong>.</li>
         <li>Mano de obra: entiende paños, chapa, días, horas de mecánica, etc.</li>
         <li>Solo las piezas a CAMBIAR llevan precio.</li>
       </ul>
@@ -215,6 +228,7 @@ Capot                 $202.771        $245.353
 
 <script>
   let plantillaFile = null;
+  let excelPeritFile = null;
   let cotizFile = null;
 
   // ---- Subida de plantilla ----
@@ -225,6 +239,16 @@ Capot                 $202.771        $245.353
     document.getElementById('plantilla-title').textContent = f.name;
     document.getElementById('plantilla-hint').textContent = 'Click para reemplazar';
     document.getElementById('dz-plantilla').classList.add('filled');
+  });
+
+  // ---- Subida del Excel de peritación ----
+  document.getElementById('excel_perit').addEventListener('change', function(e) {
+    const f = e.target.files[0];
+    if (!f) return;
+    excelPeritFile = f;
+    document.getElementById('excel-title').textContent = f.name;
+    document.getElementById('excel-hint').textContent = 'Click para reemplazar';
+    document.getElementById('dz-excel').classList.add('filled');
   });
 
   // ---- Subida de archivo de cotización ----
@@ -258,6 +282,12 @@ Capot                 $202.771        $245.353
     document.getElementById('plantilla-title').textContent = f.name;
     document.getElementById('plantilla-hint').textContent = 'Click para reemplazar';
     document.getElementById('dz-plantilla').classList.add('filled');
+  });
+  setupDrop('dz-excel', function(f) {
+    excelPeritFile = f;
+    document.getElementById('excel-title').textContent = f.name;
+    document.getElementById('excel-hint').textContent = 'Click para reemplazar';
+    document.getElementById('dz-excel').classList.add('filled');
   });
   setupDrop('dz-cotiz', function(f) {
     cotizFile = f;
@@ -293,8 +323,8 @@ Capot                 $202.771        $245.353
       return;
     }
     const texto = document.getElementById('texto').value.trim();
-    if (!texto) {
-      mostrarError('Pegá el texto de la peritación.');
+    if (!texto && !excelPeritFile) {
+      mostrarError('Pegá el texto del peritaje o subí el Excel de peritación.');
       return;
     }
 
@@ -308,6 +338,7 @@ Capot                 $202.771        $245.353
       const formData = new FormData();
       formData.append('plantilla', plantillaFile);
       formData.append('texto', texto);
+      if (excelPeritFile) formData.append('excel_perit', excelPeritFile);
       if (cotizacionTexto) formData.append('cotizacion', cotizacionTexto);
       if (cotizFile) formData.append('cotiz_file', cotizFile);
 
