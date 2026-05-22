@@ -4,8 +4,8 @@ Servidor web Flask para el generador de informes de tasacion.
 
 Endpoints:
   GET  /            -> sirve la pagina web (index.html)
-  POST /procesar    -> recibe plantilla + peritacion + cotizacion (opcional),
-                       devuelve el informe completo
+  POST /procesar    -> recibe plantilla + peritacion (texto o Excel) +
+                       cotizacion (opcional), devuelve el informe completo
 """
 
 import os
@@ -21,7 +21,7 @@ app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 
 
 # ============================================================
-#  LECTURA DE ARCHIVOS DE COTIZACION
+#  LECTURA DE ARCHIVOS
 # ============================================================
 
 def _texto_de_archivo(archivo):
@@ -45,18 +45,7 @@ def _texto_de_archivo(archivo):
 
     # --- Excel ---
     if nombre.endswith((".xlsx", ".xls")):
-        try:
-            from openpyxl import load_workbook
-            wb = load_workbook(BytesIO(datos), data_only=True)
-            lineas = []
-            for ws in wb.worksheets:
-                for fila in ws.iter_rows(values_only=True):
-                    celdas = [str(c) for c in fila if c not in (None, "")]
-                    if celdas:
-                        lineas.append("\t".join(celdas))
-            return "\n".join(lineas)
-        except Exception:
-            return ""
+        return _texto_de_excel(datos, nombre)
 
     # --- Word ---
     if nombre.endswith(".docx"):
@@ -64,7 +53,6 @@ def _texto_de_archivo(archivo):
             from docx import Document
             doc = Document(BytesIO(datos))
             partes = [p.text for p in doc.paragraphs if p.text.strip()]
-            # Tambien las tablas del documento
             for tabla in doc.tables:
                 for fila in tabla.rows:
                     celdas = [c.text.strip() for c in fila.cells
@@ -78,6 +66,72 @@ def _texto_de_archivo(archivo):
     return ""
 
 
+def _texto_de_excel(datos, nombre):
+    """
+    Extrae el contenido de un Excel volcando CADA celda con su
+    coordenada (ej: 'A55=Paragolpe', 'B55=X', 'D55=95000').
+
+    Esto le permite a Claude entender la grilla de daños con sus
+    sectores y las marcas 'X', sin importar como este estructurada.
+
+    Soporta .xlsx/.xlsm (via openpyxl) y .xls viejo (via xlrd).
+    """
+    es_xls_viejo = nombre.endswith(".xls") and not nombre.endswith(".xlsx")
+
+    lineas = []
+    try:
+        if es_xls_viejo:
+            # --- Formato .xls viejo: usar xlrd ---
+            import xlrd
+            wb = xlrd.open_workbook(file_contents=datos)
+            for sh in wb.sheets():
+                lineas.append("--- HOJA: %s ---" % sh.name)
+                for r in range(sh.nrows):
+                    celdas = []
+                    for c in range(sh.ncols):
+                        v = sh.cell_value(r, c)
+                        if v in ("", None):
+                            continue
+                        # Numeros enteros sin el .0
+                        if isinstance(v, float) and v == int(v):
+                            v = int(v)
+                        coord = _coord(c, r + 1)
+                        celdas.append("%s=%s" % (coord, v))
+                    if celdas:
+                        lineas.append(" | ".join(celdas))
+        else:
+            # --- Formato .xlsx: usar openpyxl ---
+            from openpyxl import load_workbook
+            wb = load_workbook(BytesIO(datos), data_only=True)
+            for ws in wb.worksheets:
+                lineas.append("--- HOJA: %s ---" % ws.title)
+                for fila in ws.iter_rows():
+                    celdas = []
+                    for celda in fila:
+                        if celda.value in (None, ""):
+                            continue
+                        celdas.append("%s=%s" % (celda.coordinate,
+                                                 celda.value))
+                    if celdas:
+                        lineas.append(" | ".join(celdas))
+    except Exception:
+        return ""
+
+    return "\n".join(lineas)
+
+
+def _coord(col_idx, fila):
+    """Convierte indice de columna (0=A) + fila a coordenada tipo 'B55'."""
+    letra = ""
+    n = col_idx
+    while True:
+        letra = chr(65 + n % 26) + letra
+        n = n // 26 - 1
+        if n < 0:
+            break
+    return "%s%d" % (letra, fila)
+
+
 @app.route("/")
 def index():
     """Sirve la pagina principal."""
@@ -89,11 +143,12 @@ def procesar_informe():
     """
     Recibe:
       - plantilla    (archivo .xlsx, obligatorio)
-      - texto        (texto libre del peritaje, obligatorio)
+      - texto        (texto libre del peritaje, opcional)
+      - excel_perit  (archivo Excel del peritaje, opcional)
       - cotizacion   (texto de la cotizacion de repuestos, opcional)
       - cotiz_file   (archivo de cotizacion .txt/.xlsx/.docx, opcional)
-    Devuelve:
-      - el archivo .xlsx completado para descargar
+    Hace falta texto O excel_perit (al menos uno).
+    Devuelve el archivo .xlsx completado para descargar.
     """
     try:
         # --- Validar plantilla ---
@@ -109,23 +164,34 @@ def procesar_informe():
 
         plantilla_bytes = plantilla_file.read()
 
-        # --- Texto del peritaje ---
+        # --- Peritaje: texto pegado y/o archivo Excel ---
         texto = request.form.get("texto", "").strip()
-        if not texto:
-            return jsonify({"error": "Pega el texto de la peritacion"}), 400
 
-        # --- Cotizacion: puede venir como texto pegado y/o como archivo ---
+        if "excel_perit" in request.files:
+            f = request.files["excel_perit"]
+            if f and f.filename != "":
+                texto_excel = _texto_de_archivo(f)
+                if texto_excel:
+                    # Se marca claramente que es una grilla de Excel,
+                    # para que el procesador la interprete como tal.
+                    bloque = ("\n\n=== PERITAJE DESDE EXCEL (GRILLA) ===\n"
+                              + texto_excel)
+                    texto = (texto + bloque).strip()
+
+        if not texto:
+            return jsonify({
+                "error": "Carga el texto del peritaje o subi el Excel de peritacion"
+            }), 400
+
+        # --- Cotizacion: texto pegado y/o archivo ---
         cotizacion = request.form.get("cotizacion", "").strip()
 
         if "cotiz_file" in request.files:
             texto_archivo = _texto_de_archivo(request.files["cotiz_file"])
             if texto_archivo:
-                # Si hay texto pegado Y archivo, se combinan ambos.
                 cotizacion = (cotizacion + "\n\n" + texto_archivo).strip()
 
-        # --- Procesar ---
-        # La cotizacion se suma al texto del peritaje: el procesador la
-        # entiende y empareja los precios con las piezas a CAMBIAR.
+        # --- Armar el texto completo y procesar ---
         texto_completo = texto
         if cotizacion:
             texto_completo += (
