@@ -203,8 +203,13 @@ def _texto_de_excel(datos, nombre):
     sectores y las marcas 'X', sin importar como este estructurada.
 
     Soporta .xlsx/.xlsm (via openpyxl) y .xls viejo (via xlrd).
+    La deteccion del formato se hace por los primeros bytes (firma del
+    archivo), no por la extension, porque a veces vienen archivos .xls
+    renombrados como .xlsx (y viceversa).
     """
-    es_xls_viejo = nombre.endswith(".xls") and not nombre.endswith(".xlsx")
+    # Firmas: xlsx/zip = "PK", xls viejo (OLE2) = D0 CF 11 E0
+    es_xls_viejo = datos.startswith(b"\xd0\xcf\x11\xe0")
+    es_xlsx = datos.startswith(b"PK")
 
     lineas = []
     try:
@@ -227,10 +232,15 @@ def _texto_de_excel(datos, nombre):
                         celdas.append("%s=%s" % (coord, v))
                     if celdas:
                         lineas.append(" | ".join(celdas))
-        else:
+        elif es_xlsx:
             # --- Formato .xlsx: usar openpyxl ---
             from openpyxl import load_workbook
             wb = load_workbook(BytesIO(datos), data_only=True)
+            if not wb.sheetnames:
+                # xlsx con cero hojas (suele pasar con archivos
+                # exportados en formato "Strict OOXML" desde sistemas
+                # legacy). Avisar al usuario en vez de devolver vacio.
+                raise ValueError("xlsx_sin_hojas")
             for ws in wb.worksheets:
                 lineas.append("--- HOJA: %s ---" % ws.title)
                 for fila in ws.iter_rows():
@@ -242,6 +252,10 @@ def _texto_de_excel(datos, nombre):
                                                  celda.value))
                     if celdas:
                         lineas.append(" | ".join(celdas))
+        else:
+            raise ValueError("formato_no_reconocido")
+    except ValueError:
+        raise
     except Exception:
         return ""
 
@@ -304,7 +318,24 @@ def procesar_informe():
         if "excel_perit" in request.files:
             f = request.files["excel_perit"]
             if f and f.filename != "":
-                texto_excel = _texto_de_archivo(f)
+                try:
+                    texto_excel = _texto_de_archivo(f)
+                except ValueError as e:
+                    motivo = str(e)
+                    if motivo == "xlsx_sin_hojas":
+                        msg = ("El archivo Excel está guardado en un formato "
+                               "no compatible (suele pasar con archivos "
+                               "exportados desde sistemas de aseguradoras). "
+                               "Abrilo en Excel y usá 'Guardar como' → "
+                               "'Libro de Excel (.xlsx)' o '.xls', y volvé "
+                               "a subirlo.")
+                    elif motivo == "formato_no_reconocido":
+                        msg = ("No pude reconocer el formato del archivo "
+                               "Excel. Asegurate de que sea un .xlsx o .xls "
+                               "válido.")
+                    else:
+                        msg = "No se pudo leer el archivo Excel."
+                    return jsonify({"error": msg}), 400
                 if texto_excel:
                     # Se marca claramente que es una grilla de Excel,
                     # para que el procesador la interprete como tal.
