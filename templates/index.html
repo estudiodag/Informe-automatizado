@@ -134,6 +134,44 @@
   .plantilla-opt .pl-hint { color: #64748b; font-size: 13px; margin-top: 4px; }
   @media (max-width: 560px) { .plantilla-grid { grid-template-columns: 1fr; } }
 
+  /* Dropzone unificado: textarea + archivos */
+  .card-paso-siniestro { background: #fff7ed; border-color: #fed7aa; }
+  .dropzone-mix {
+    border: 2px dashed #cbd5e1; border-radius: 12px;
+    padding: 12px; background: white;
+    transition: border-color 0.2s;
+  }
+  .dropzone-mix.drag-over { border-color: #f97316; background: #fff7ed; }
+  .dropzone-mix textarea {
+    border: none; min-height: 120px; background: transparent;
+    padding: 8px;
+  }
+  .dropzone-mix textarea:focus { box-shadow: none; }
+  .dz-adjuntos { padding: 4px 8px; }
+  .dz-adjuntos .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: #e2e8f0; border-radius: 999px;
+    padding: 4px 10px 4px 12px; margin: 4px 6px 4px 0;
+    font-size: 13px;
+  }
+  .dz-adjuntos .chip .x {
+    cursor: pointer; color: #64748b; font-weight: bold;
+    padding: 2px 4px; border-radius: 999px;
+  }
+  .dz-adjuntos .chip .x:hover { background: #cbd5e1; color: #0f172a; }
+  .dz-add-btn {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px; border-top: 1px solid #e2e8f0;
+    margin-top: 4px;
+  }
+  .dz-add-btn button {
+    background: white; border: 1px solid #cbd5e1;
+    border-radius: 8px; padding: 6px 12px; cursor: pointer;
+    font-size: 13px; font-weight: 500;
+  }
+  .dz-add-btn button:hover { background: #f1f5f9; border-color: #94a3b8; }
+  .dz-hint { color: #94a3b8; font-size: 12px; }
+
   .insp-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
     margin-bottom: 20px; }
   .insp-row-3 { grid-template-columns: 1fr 1fr 1fr; }
@@ -182,9 +220,27 @@
     </div>
   </div>
 
-  <!-- PASO 2: Peritación -->
+  <!-- PASO 2: Datos del siniestro (NUEVO) -->
+  <div class="card card-paso-siniestro">
+    <h2><span class="step-num">2</span>Datos del siniestro <span class="optional">(opcional)</span></h2>
+    <p class="desc">
+      Pegá acá cualquier texto con los datos del siniestro (nº stro, asegurado, marca/modelo, dominio, chasis, suma, franquicia, teléfono) y/o <strong>arrastrá PDFs o fotos</strong> del pedido de inspección / carátula de póliza. El sistema los lee automáticamente.
+    </p>
+
+    <div class="dropzone-mix" id="dz-encab">
+      <textarea id="encab_texto" placeholder="Pegá acá el texto con los datos del siniestro, o arrastrá PDFs/imágenes dentro del cuadro..."></textarea>
+      <div class="dz-adjuntos" id="dz-encab-adjuntos" style="display:none;"></div>
+      <div class="dz-add-btn">
+        <input type="file" id="encab_adjunto_file" accept=".pdf,.jpg,.jpeg,.png,.webp,.gif" multiple style="display:none">
+        <button type="button" onclick="document.getElementById('encab_adjunto_file').click()">📎 Agregar archivos (PDF o imagen)</button>
+        <span class="dz-hint">o arrastralos adentro del cuadro</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- PASO 3: Peritación -->
   <div class="card card-paso-2">
-    <h2><span class="step-num">2</span>Cargá la peritación</h2>
+    <h2><span class="step-num">3</span>Cargá la peritación</h2>
     <p class="desc">Pegá el texto del peritaje o subí el Excel de peritación. El sistema lo interpreta con inteligencia.</p>
 
     <div class="insp-row insp-row-3">
@@ -224,9 +280,9 @@ mano de obra, datos del vehículo, fechas, observaciones, etc."></textarea>
     <input type="file" id="excel_perit" accept=".xlsx,.xls" style="display:none">
   </div>
 
-  <!-- PASO 3: Cotización de repuestos -->
+  <!-- PASO 4: Cotización de repuestos -->
   <div class="card card-paso-3">
-    <h2><span class="step-num">3</span>Cotización de repuestos <span class="optional">(opcional)</span></h2>
+    <h2><span class="step-num">4</span>Cotización de repuestos <span class="optional">(opcional)</span></h2>
     <p class="desc">
       Pegá la cotización abajo. Los precios se cargan en el informe usando el
       valor con IVA. Si no pegás nada, los repuestos van en $0 para que los
@@ -261,6 +317,7 @@ Capot                 $202.771        $245.353
 <script>
   let plantillaClave = null;
   let excelPeritFile = null;
+  let encabAdjuntos = [];  // archivos del encabezado (PDFs/imagenes)
 
   // ---- Selección de plantilla precargada ----
   function elegirPlantilla(clave) {
@@ -304,6 +361,68 @@ Capot                 $202.771        $245.353
     document.getElementById('dz-excel').classList.add('filled');
   });
 
+  // ---- Dropzone unificado del encabezado (texto + archivos) ----
+  function renderEncabAdjuntos() {
+    const cont = document.getElementById('dz-encab-adjuntos');
+    if (encabAdjuntos.length === 0) {
+      cont.style.display = 'none';
+      cont.innerHTML = '';
+      return;
+    }
+    cont.style.display = 'block';
+    cont.innerHTML = encabAdjuntos.map((f, i) =>
+      '<span class="chip">' +
+      (f.name.toLowerCase().endsWith('.pdf') ? '📄' : '🖼️') + ' ' +
+      f.name.replace(/</g, '&lt;') +
+      ' <span class="x" onclick="quitarEncabAdjunto(' + i + ')" title="Quitar">×</span>' +
+      '</span>'
+    ).join('');
+  }
+  function agregarEncabAdjuntos(files) {
+    for (const f of files) {
+      // Max 10 archivos total
+      if (encabAdjuntos.length >= 10) break;
+      // Validar tipo
+      const n = f.name.toLowerCase();
+      if (n.endsWith('.pdf') || n.endsWith('.jpg') || n.endsWith('.jpeg') ||
+          n.endsWith('.png') || n.endsWith('.gif') || n.endsWith('.webp')) {
+        encabAdjuntos.push(f);
+      }
+    }
+    renderEncabAdjuntos();
+  }
+  function quitarEncabAdjunto(i) {
+    encabAdjuntos.splice(i, 1);
+    renderEncabAdjuntos();
+  }
+  document.getElementById('encab_adjunto_file').addEventListener('change', function(e) {
+    agregarEncabAdjuntos(e.target.files);
+    e.target.value = '';  // reset para poder re-seleccionar el mismo
+  });
+
+  // Drag & drop sobre el dropzone-mix completo
+  (function() {
+    const zone = document.getElementById('dz-encab');
+    if (!zone) return;
+    zone.addEventListener('dragover', function(e) {
+      e.preventDefault();
+      zone.classList.add('drag-over');
+    });
+    zone.addEventListener('dragleave', function(e) {
+      // Solo quitar la clase si realmente salimos de la zona
+      if (!zone.contains(e.relatedTarget)) {
+        zone.classList.remove('drag-over');
+      }
+    });
+    zone.addEventListener('drop', function(e) {
+      e.preventDefault();
+      zone.classList.remove('drag-over');
+      if (e.dataTransfer.files.length > 0) {
+        agregarEncabAdjuntos(e.dataTransfer.files);
+      }
+    });
+  })();
+
   // ---- Mensajes ----
   function mostrarError(msg) {
     const box = document.getElementById('error-box');
@@ -331,8 +450,10 @@ Capot                 $202.771        $245.353
       return;
     }
     const texto = document.getElementById('texto').value.trim();
-    if (!texto && !excelPeritFile) {
-      mostrarError('Pegá el texto del peritaje o subí el Excel de peritación.');
+    const encabTexto = document.getElementById('encab_texto').value.trim();
+    const hayEncab = encabTexto || encabAdjuntos.length > 0;
+    if (!texto && !excelPeritFile && !hayEncab) {
+      mostrarError('Cargá al menos uno: datos del siniestro (paso 2), texto del peritaje o Excel (paso 3).');
       return;
     }
 
@@ -354,6 +475,12 @@ Capot                 $202.771        $245.353
       formData.append('texto', texto);
       if (excelPeritFile) formData.append('excel_perit', excelPeritFile);
       if (cotizacionTexto) formData.append('cotizacion', cotizacionTexto);
+
+      // Adjuntos del encabezado (paso 2)
+      if (encabTexto) formData.append('encab_texto', encabTexto);
+      encabAdjuntos.forEach(function(f, i) {
+        formData.append('encab_adjunto_' + i, f);
+      });
 
       const resp = await fetch('/procesar', {
         method: 'POST',
