@@ -39,11 +39,56 @@ def normalizar(texto):
 
 
 def a_numero(valor):
-    """Convierte un string a numero, quitando $, puntos y comas."""
+    """Convierte un string a numero ENTERO, quitando $, puntos y comas.
+    Pensado para MONTOS en pesos (no tiene decimales).
+    """
     if valor is None:
         return 0
+    if isinstance(valor, (int, float)):
+        return int(valor)
     s = re.sub(r"[^\d]", "", str(valor))
     return int(s) if s else 0
+
+
+def a_numero_decimal(valor):
+    """
+    Como a_numero pero preservando decimales. Pensado para CANTIDADES
+    de mano de obra (ej: '1,5' horas, '0.75 panos').
+
+    Interpreta:
+      - 1.5 o '1.5' o '1,5'  -> 1.5
+      - '1.500'              -> 1500 (miles, no decimal)
+      - '1.500,50'           -> 1500.5
+      - 15                   -> 15
+    """
+    if valor is None or valor == "":
+        return 0
+    if isinstance(valor, (int, float)):
+        return valor
+    s = str(valor).strip().replace("$", "").replace(" ", "")
+    if not s:
+        return 0
+
+    try:
+        if "," in s:
+            # Formato AR: coma es decimal, punto es separador de miles.
+            s = s.replace(".", "").replace(",", ".")
+            return float(s)
+        if s.count(".") == 1:
+            # Un solo punto: 1-2 digitos despues = decimal, 3 = miles.
+            partes = s.split(".")
+            if len(partes[1]) <= 2:
+                return float(s)
+            # Miles: "1.500" -> 1500
+            return int(partes[0] + partes[1])
+        if s.count(".") >= 2:
+            # Miles: "1.500.000" -> 1500000
+            return int(s.replace(".", ""))
+        # Solo digitos
+        n = re.sub(r"[^\d]", "", s)
+        return int(n) if n else 0
+    except Exception:
+        return 0
 
 
 # ============================================================
@@ -155,6 +200,11 @@ Reglas de interpretacion:
   "7 panos", "pint 7", "7p" -> pintura = 7.
   "chapa 3", "3 dias", "3d", "3 jornadas" -> chapa = 3.
   "12 hs mecanica", "mecanica 12" -> mecanica = 12.
+  LAS CANTIDADES PUEDEN TENER DECIMALES (horas y medias, pañitos
+  parciales, etc). Interpretar coma Y punto como separador decimal:
+  "mec 1,5" o "mec 1.5" -> mecanica = 1.5 (NO 15).
+  "pint 7,25" -> pintura = 7.25.
+  "0,5 dias chapa" -> chapa = 0.5.
 - "carga de gas", "varios", "service", "cristaleria", "vidrieria",
   "alineacion", "electricidad" -> NO son cantidades de unidades; son
   items con un SUBTOTAL EN PESOS. Sumá todos esos subtotales y guardalos
@@ -583,8 +633,11 @@ def parsear_texto(texto):
     data["franquicia"] = a_numero(parsed.get("franquicia", 0))
 
     mo = parsed.get("manoObra", {}) or {}
-    for k in ("pintura", "chapa", "mecanica", "tapiceria", "varios"):
-        data["manoObra"][k] = a_numero(mo.get(k, 0))
+    # Cantidades: pueden ser decimales (ej: 1.5 horas de mecanica).
+    # Varios: siempre monto entero en pesos.
+    for k in ("pintura", "chapa", "mecanica", "tapiceria"):
+        data["manoObra"][k] = a_numero_decimal(mo.get(k, 0))
+    data["manoObra"]["varios"] = a_numero(mo.get("varios", 0))
 
     danos = []
     for d in parsed.get("danos", []) or []:
@@ -1228,15 +1281,18 @@ def completar_plantilla(plantilla_bytes, data):
         if fila == FILA_VARIOS:
             # Fila especial "Varios": E:F mergeado. Escribir total
             # directo en G (merged G:H).
-            total = a_numero(cantidad) * a_numero(unitario)
-            if total == 0 and a_numero(unitario) > 0:
+            cant_dec = a_numero_decimal(cantidad)
+            unit_int = a_numero(unitario)
+            total = cant_dec * unit_int
+            if total == 0 and unit_int > 0:
                 # Si solo vino el monto como "unitario" (sin cantidad),
                 # usar ese valor como total.
-                total = a_numero(unitario)
+                total = unit_int
             if total:
-                _escribir(ws, fila, 7, total)
+                _escribir(ws, fila, 7, int(total) if total == int(total) else total)
         else:
-            _escribir(ws, fila, 5, a_numero(cantidad))   # E
+            # Cantidades pueden ser decimales (ej: 1.5 horas de mecanica).
+            _escribir(ws, fila, 5, a_numero_decimal(cantidad))   # E
             if a_numero(unitario):
                 _escribir(ws, fila, 6, a_numero(unitario))   # F
 

@@ -53,7 +53,7 @@ def _es_x(valor):
 
 
 def _a_numero(valor):
-    """Convierte un valor (str o numérico) a int. Devuelve 0 si no es número."""
+    """Convierte un valor (str o numérico) a int. Para MONTOS en pesos."""
     if valor is None or valor == "":
         return 0
     if isinstance(valor, (int, float)):
@@ -73,6 +73,36 @@ def _a_numero(valor):
             s = partes[0] + partes[1]
     try:
         return int(float(s))
+    except (ValueError, TypeError):
+        return 0
+
+
+def _a_numero_decimal(valor):
+    """
+    Como _a_numero pero PRESERVA DECIMALES. Para CANTIDADES de mano
+    de obra que pueden ser '1,5' horas, '0.75 panos', etc.
+    """
+    if valor is None or valor == "":
+        return 0
+    if isinstance(valor, (int, float)):
+        return valor
+    s = str(valor).strip().replace("$", "").replace(" ", "")
+    if not s:
+        return 0
+    try:
+        if "," in s:
+            # Coma decimal AR
+            s = s.replace(".", "").replace(",", ".")
+            return float(s)
+        if s.count(".") == 1:
+            # 1-2 digitos despues del punto = decimal; 3 = miles
+            partes = s.split(".")
+            if len(partes[1]) <= 2:
+                return float(s)
+            return int(partes[0] + partes[1])
+        if s.count(".") >= 2:
+            return int(s.replace(".", ""))
+        return int(s)
     except (ValueError, TypeError):
         return 0
 
@@ -438,12 +468,15 @@ def _extraer_mano_obra_y_franquicia(celdas):
                 if val_upper in UNIDADES and not unidad:
                     unidad = val.strip()
                     continue
-                n_str = _a_numero(val)
-                if n_str > 0:
-                    numeros_encontrados.append((col_etiqueta + dc, n_str))
+                # Usar _a_numero_decimal para preservar decimales en
+                # cantidades (ej: 1,5 horas).
+                n_dec = _a_numero_decimal(val)
+                if n_dec > 0:
+                    numeros_encontrados.append((col_etiqueta + dc, n_dec))
             elif isinstance(val, (int, float)):
                 if val > 0:
-                    numeros_encontrados.append((col_etiqueta + dc, int(val)))
+                    # Preservar float (1.5 queda como 1.5, no 1)
+                    numeros_encontrados.append((col_etiqueta + dc, val))
 
         # Necesitamos al menos un numero para ser un item valido.
         if not numeros_encontrados:
