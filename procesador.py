@@ -1142,22 +1142,36 @@ def completar_plantilla(plantilla_bytes, data):
     if franq:
         _escribir(ws, 11, 8, franq)                          # H11
 
-    # Fila 13: Taller | Dirección IP
+    # Fila 13: Taller | Dirección IP (+ Localidad concatenada)
     _escribir(ws, 13, 2, data.get("tallerNombre", ""))       # B13:C13
-    _escribir(ws, 13, 5, data.get("tallerDireccion", ""))    # E13:H13
+    dir_insp = (data.get("tallerDireccion") or "").strip()
+    loc_insp = (data.get("tallerLocalidad") or "").strip()
+    if dir_insp and loc_insp:
+        direccion_completa = f"{dir_insp} - {loc_insp}"
+    else:
+        direccion_completa = dir_insp or loc_insp
+    _escribir(ws, 13, 5, direccion_completa)                 # E13:H13
 
     # Fila 15: Teléfono | Email
     _escribir(ws, 15, 2, data.get("tallerTelefono", ""))     # B15:C15
     _escribir(ws, 15, 5, data.get("tallerEmail", ""))        # E15:H15
 
-    # ---------- 2) PIEZAS (filas 18-50, max 33) ----------
+    # ---------- 2) PIEZAS: con expansion dinamica si hay > 33 ----------
+    # La plantilla trae 33 filas de piezas (18-50). Si el peritaje tiene
+    # mas, insertamos filas antes de la fila 51 (OBSERVACIONES), de
+    # modo que toda la seccion de abajo se desplaza y las formulas de
+    # totales se actualizan al nuevo rango.
     FILA_INICIO_PIEZAS = 18
-    FILA_FIN_PIEZAS = 50  # inclusive
-    MAX_PIEZAS = FILA_FIN_PIEZAS - FILA_INICIO_PIEZAS + 1  # 33
+    FILA_FIN_PIEZAS_BASE = 50  # fin en la plantilla sin ampliar
 
     danos = data.get("danos") or []
+    extras = max(0, len(danos) - (FILA_FIN_PIEZAS_BASE - FILA_INICIO_PIEZAS + 1))
+    if extras > 0:
+        _ampliar_filas_piezas(ws, FILA_FIN_PIEZAS_BASE, extras)
+
+    FILA_FIN_PIEZAS = FILA_FIN_PIEZAS_BASE + extras
+    MAX_PIEZAS = FILA_FIN_PIEZAS - FILA_INICIO_PIEZAS + 1
     piezas_a_escribir = danos[:MAX_PIEZAS]
-    piezas_sobrantes = len(danos) - len(piezas_a_escribir)
 
     for i, dano in enumerate(piezas_a_escribir):
         fila = FILA_INICIO_PIEZAS + i
@@ -1169,28 +1183,21 @@ def completar_plantilla(plantilla_bytes, data):
             precio = a_numero(dano.get("precio", 0) or 0)
             _escribir(ws, fila, 7, precio)  # G:H (merged): precio
 
-    # Si sobran piezas, en FASE 1 se guardan en observaciones como aviso.
-    # (En FASE 2 vamos a agregar la lógica para insertar filas extras.)
-
-    # ---------- 3) OBSERVACIONES (A52:C57 merged) ----------
-    # La plantilla tiene A52:C52, A53:C53... cada una merged por fila.
-    # Para que el texto largo entre bien, re-mergeamos A52:C57 como una
-    # sola celda grande.
-    _preparar_celda_observaciones(ws)
+    # ---------- 3) OBSERVACIONES ----------
+    # Despues de ampliar: la celda OBSERVACIONES "titulo" se desplazo
+    # extras filas hacia abajo. Las filas de contenido son:
+    #    (52 + extras) a (57 + extras)
+    fila_obs_titulo = 51 + extras
+    fila_obs_inicio = 52 + extras
+    fila_obs_fin = 57 + extras
+    _preparar_celda_observaciones(ws, fila_obs_inicio, fila_obs_fin)
 
     obs = (data.get("observaciones") or "").strip()
-    if piezas_sobrantes > 0:
-        aviso = (f"[AVISO] El peritaje tiene {len(danos)} piezas pero "
-                 f"la plantilla solo soporta {MAX_PIEZAS}. Se cargaron "
-                 f"las primeras {MAX_PIEZAS}; faltan {piezas_sobrantes} "
-                 f"por agregar manualmente.")
-        obs = (aviso + "\n\n" + obs).strip() if obs else aviso
     if obs:
-        _escribir(ws, 52, 1, obs)
-        # Habilitar wrap_text para que el texto largo se vea bien.
+        _escribir(ws, fila_obs_inicio, 1, obs)
         try:
             from openpyxl.styles import Alignment
-            celda = ws.cell(row=52, column=1)
+            celda = ws.cell(row=fila_obs_inicio, column=1)
             celda.alignment = Alignment(
                 wrap_text=True,
                 vertical="top",
@@ -1200,12 +1207,14 @@ def completar_plantilla(plantilla_bytes, data):
         except Exception:
             pass
 
-    # ---------- 4) MANO DE OBRA (filas 53-57) ----------
-    # D = CONCEPTO, E = CANT., F = V. UNITARIO, G:H (merged) = SUBTOTAL
-    # NO tocar G (es formula =E*F que ya viene en la plantilla).
-    FILA_INICIO_MO = 53
-    FILA_FIN_MO = 57
+    # ---------- 4) MANO DE OBRA (desplazadas por extras) ----------
+    # Las filas de MO estaban en 53-57; despues de insertar extras
+    # filas antes de la 51, pasan a 53+extras a 57+extras.
+    FILA_INICIO_MO = 53 + extras
+    FILA_FIN_MO = 57 + extras
     MAX_MO = FILA_FIN_MO - FILA_INICIO_MO + 1  # 5 filas
+    # La fila "Varios" (con E:F merged) tambien se desplaza.
+    FILA_VARIOS = 57 + extras
 
     def _escribir_mo(fila, concepto, cantidad, unitario):
         """
@@ -1216,16 +1225,16 @@ def completar_plantilla(plantilla_bytes, data):
         formula), que igualmente entra en el SUM de G58.
         """
         _escribir(ws, fila, 4, concepto or "")
-        if fila == 57:
-            # Fila especial "Varios": E57:F57 mergeado. Escribir total
-            # directo en G57 (merged G57:H57).
+        if fila == FILA_VARIOS:
+            # Fila especial "Varios": E:F mergeado. Escribir total
+            # directo en G (merged G:H).
             total = a_numero(cantidad) * a_numero(unitario)
             if total == 0 and a_numero(unitario) > 0:
                 # Si solo vino el monto como "unitario" (sin cantidad),
                 # usar ese valor como total.
                 total = a_numero(unitario)
             if total:
-                _escribir(ws, fila, 7, total)   # G57
+                _escribir(ws, fila, 7, total)
         else:
             _escribir(ws, fila, 5, a_numero(cantidad))   # E
             if a_numero(unitario):
@@ -1242,7 +1251,7 @@ def completar_plantilla(plantilla_bytes, data):
         # Filas sobrantes: dejar cantidad y unitario en 0.
         for i in range(len(items_mo), MAX_MO):
             fila = FILA_INICIO_MO + i
-            if fila != 57:
+            if fila != FILA_VARIOS:
                 _escribir(ws, fila, 5, 0)
                 _escribir(ws, fila, 6, 0)
     else:
@@ -1272,6 +1281,15 @@ def completar_plantilla(plantilla_bytes, data):
     # plantilla original a nivel ZIP, si faltan.
     generado = _reinyectar_imagenes(plantilla_bytes, generado)
 
+    # Si se insertaron filas extra (peritaje > 33 piezas), las
+    # imagenes/dibujos que estaban por debajo quedaron en su posicion
+    # original y hay que desplazarlas tambien. Esto se hace a nivel
+    # XML en el ZIP porque openpyxl no mueve los anchors de shapes.
+    if extras > 0:
+        # Fila de corte 1-indexed: desplazamos las imagenes cuya
+        # fila XML sea >= (51-1 = 50 en 0-indexed, osea Excel 51).
+        generado = _desplazar_imagenes_debajo_de(generado, 51, extras)
+
     # Arreglar Content_Types.xml DESPUES de reinyectar las imagenes:
     # openpyxl a veces se olvida de declarar las extensiones (ej:
     # jpeg) y Excel no puede abrir el archivo. Esto garantiza que
@@ -1279,6 +1297,71 @@ def completar_plantilla(plantilla_bytes, data):
     generado = _arreglar_content_types_imagenes(generado)
 
     return generado
+
+
+def _desplazar_imagenes_debajo_de(archivo_bytes, fila_excel_1indexed, extras):
+    """
+    Desplaza las imagenes/dibujos que estan por debajo de una cierta
+    fila `extras` filas hacia abajo, modificando los <xdr:row> en los
+    drawings XML a nivel ZIP.
+
+    openpyxl insert_rows() no actualiza los anchors de las imagenes
+    (sobre todo las que son shapes/DrawingML complejos que openpyxl no
+    maneja). Esto lo arregla a nivel XML.
+
+    Las filas en el XML del drawing son 0-indexed, por eso restamos 1
+    al convertir desde el 1-indexed de Excel.
+    """
+    if extras <= 0:
+        return archivo_bytes
+    try:
+        import zipfile
+        import re as _re
+        from io import BytesIO as _BIO
+
+        fila_corte_xml = fila_excel_1indexed - 1  # convertir a 0-indexed
+        cambios = {}
+
+        zin = zipfile.ZipFile(_BIO(archivo_bytes), "r")
+        try:
+            for nombre in zin.namelist():
+                if not (nombre.startswith("xl/drawings/drawing")
+                        and nombre.endswith(".xml")):
+                    continue
+                contenido = zin.read(nombre).decode("utf-8")
+
+                def _reemplazar(match):
+                    valor = int(match.group(1))
+                    if valor >= fila_corte_xml:
+                        return f"<xdr:row>{valor + extras}</xdr:row>"
+                    return match.group(0)
+
+                nuevo = _re.sub(
+                    r"<xdr:row>(\d+)</xdr:row>",
+                    _reemplazar, contenido)
+                if nuevo != contenido:
+                    cambios[nombre] = nuevo.encode("utf-8")
+        finally:
+            zin.close()
+
+        if not cambios:
+            return archivo_bytes
+
+        salida = _BIO()
+        zin = zipfile.ZipFile(_BIO(archivo_bytes), "r")
+        zout = zipfile.ZipFile(salida, "w", zipfile.ZIP_DEFLATED)
+        try:
+            for item in zin.infolist():
+                if item.filename in cambios:
+                    zout.writestr(item, cambios[item.filename])
+                else:
+                    zout.writestr(item, zin.read(item.filename))
+        finally:
+            zin.close()
+            zout.close()
+        return salida.getvalue()
+    except Exception:
+        return archivo_bytes
 
 
 def _arreglar_content_types_imagenes(archivo_bytes):
@@ -1352,25 +1435,124 @@ def _arreglar_content_types_imagenes(archivo_bytes):
         return archivo_bytes
 
 
-def _preparar_celda_observaciones(ws):
+def _preparar_celda_observaciones(ws, fila_inicio=52, fila_fin=57):
     """
-    Las observaciones ocupan A52:C57 en la plantilla, pero vienen con
-    cada fila mergeada por separado (A52:C52, A53:C53, ...). Para que
-    un texto largo con wrap_text se vea bien en una sola celda alta,
-    des-mergeamos las 6 filas y las re-mergeamos como una sola gran
-    celda A52:C57.
+    Las observaciones ocupan A{fila_inicio}:C{fila_fin}, pero vienen
+    con cada fila mergeada por separado (A52:C52, A53:C53, ...). Para
+    que un texto largo con wrap_text se vea bien en una sola celda
+    alta, des-mergeamos las N filas y las re-mergeamos como una sola
+    gran celda.
     """
     try:
-        # Rangos individuales a quitar.
-        a_quitar = [f"A{r}:C{r}" for r in range(52, 58)]
+        a_quitar = [f"A{r}:C{r}" for r in range(fila_inicio, fila_fin + 1)]
         for rango in a_quitar:
             if rango in {str(m) for m in ws.merged_cells.ranges}:
                 ws.unmerge_cells(rango)
-        # Mergear como una sola celda grande.
-        ws.merge_cells("A52:C57")
+        ws.merge_cells(f"A{fila_inicio}:C{fila_fin}")
     except Exception:
-        # Si falla, se escribe el texto en A52 igual. Puede truncarse
-        # visualmente pero el dato queda guardado.
+        pass
+
+
+def _ampliar_filas_piezas(ws, fila_fin_base, extras):
+    """
+    Inserta `extras` filas nuevas para piezas DESPUES de la ultima fila
+    de piezas original (fila_fin_base, por defecto 50). Las filas de
+    OBSERVACIONES, mano de obra y totales se desplazan hacia abajo.
+
+    IMPORTANTE: openpyxl `insert_rows()` tiene un bug que NO mueve los
+    merges que empiezan en la fila donde se inserta. Para evitarlo,
+    primero des-mergeamos todo lo de abajo, insertamos, y los
+    re-mergeamos en su nueva posicion.
+
+    Despues de insertar:
+      - Replica los merges B:F y G:H para las filas nuevas.
+      - Copia estilos (bordes, fuente, alineacion) de la fila modelo.
+      - Actualiza las formulas de los totales con los nuevos rangos.
+    """
+    try:
+        from copy import copy as _copy
+
+        FILA_MODELO = 18
+        fila_insert = fila_fin_base + 1  # 51
+
+        # 1) Guardar y des-mergear todos los merges que empiezan en
+        #    `fila_insert` o despues. Los vamos a recrear desplazados.
+        merges_a_desplazar = []
+        for m in list(ws.merged_cells.ranges):
+            if m.min_row >= fila_insert:
+                merges_a_desplazar.append({
+                    "min_r": m.min_row, "max_r": m.max_row,
+                    "min_c": m.min_col, "max_c": m.max_col,
+                })
+                ws.unmerge_cells(str(m))
+
+        # 2) Insertar las filas vacias.
+        ws.insert_rows(fila_insert, extras)
+
+        # 3) Re-mergear los merges desplazando sus filas.
+        for m in merges_a_desplazar:
+            try:
+                ws.merge_cells(start_row=m["min_r"] + extras,
+                               end_row=m["max_r"] + extras,
+                               start_column=m["min_c"],
+                               end_column=m["max_c"])
+            except Exception:
+                pass
+
+        # 4) Replicar merges B:F y G:H en las filas nuevas de piezas.
+        for i in range(extras):
+            f = fila_insert + i
+            try:
+                ws.merge_cells(start_row=f, start_column=2,
+                               end_row=f, end_column=6)   # B:F pieza
+                ws.merge_cells(start_row=f, start_column=7,
+                               end_row=f, end_column=8)   # G:H precio
+            except Exception:
+                pass
+            # Copiar altura y estilos de la fila modelo.
+            try:
+                h = ws.row_dimensions[FILA_MODELO].height
+                if h:
+                    ws.row_dimensions[f].height = h
+            except Exception:
+                pass
+            for col in range(1, 9):
+                try:
+                    src = ws.cell(row=FILA_MODELO, column=col)
+                    dst = ws.cell(row=f, column=col)
+                    if src.has_style:
+                        dst.font = _copy(src.font)
+                        dst.border = _copy(src.border)
+                        dst.fill = _copy(src.fill)
+                        dst.alignment = _copy(src.alignment)
+                        dst.number_format = src.number_format
+                        dst.protection = _copy(src.protection)
+                except Exception:
+                    pass
+
+        # 5) Actualizar formulas de totales con los nuevos indices.
+        f_mo_total = 58 + extras       # era 58 (=SUM(G53:H57))
+        f_repuestos = 59 + extras      # era 59 (=SUM(G18:H50))
+        f_franq = 60 + extras          # era 60 (=+H11)
+        f_neto = 61 + extras           # era 61 (=+G58+G59-G60)
+        f_mo_ini = 53 + extras         # era 53
+        f_mo_fin = 57 + extras         # era 57
+        f_pz_fin = fila_fin_base + extras  # era 50
+
+        _escribir(ws, f_mo_total, 7, f"=SUM(G{f_mo_ini}:H{f_mo_fin})")
+        _escribir(ws, f_repuestos, 7, f"=SUM(G18:H{f_pz_fin})")
+        _escribir(ws, f_franq, 7, "=+H11")
+        _escribir(ws, f_neto, 7, f"=+G{f_mo_total}+G{f_repuestos}-G{f_franq}")
+
+        # 6) openpyxl insert_rows no actualiza las referencias de
+        #    formulas. Las formulas G=E*F en las filas de MO (ex 53-56)
+        #    siguen apuntando a E53*F53 pero deberian apuntar a la
+        #    nueva fila. Las re-escribimos para cada fila MO menos la
+        #    de "Varios" (que no tiene formula E*F).
+        for i in range(4):  # Pintura, Chapa, Mecanica, Tapiceria
+            f = f_mo_ini + i
+            _escribir(ws, f, 7, f"=+E{f}*F{f}")
+    except Exception:
         pass
 
 
