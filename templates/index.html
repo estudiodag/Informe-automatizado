@@ -135,7 +135,16 @@
   @media (max-width: 560px) { .plantilla-grid { grid-template-columns: 1fr; } }
 
   /* Dropzone unificado: textarea + archivos */
-  .card-paso-siniestro { background: #fff7ed; border-color: #fed7aa; }
+  .card-paso-siniestro {
+    background: #1e293b;     /* gris oscuro (slate-800) */
+    border-color: #334155;   /* slate-700 */
+    color: #f1f5f9;          /* texto claro */
+  }
+  .card-paso-siniestro h2 { color: #f1f5f9; }
+  .card-paso-siniestro p.desc { color: #cbd5e1; }
+  .card-paso-siniestro .optional { color: #94a3b8; }
+  .card-paso-siniestro strong { color: #ffffff; }
+  .card-paso-siniestro .dz-hint { color: #94a3b8; }
   .dropzone-mix {
     border: 2px dashed #cbd5e1; border-radius: 12px;
     padding: 12px; background: white;
