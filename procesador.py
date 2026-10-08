@@ -1292,7 +1292,17 @@ def completar_plantilla(plantilla_bytes, data):
                 _escribir(ws, fila, 7, int(total) if total == int(total) else total)
         else:
             # Cantidades pueden ser decimales (ej: 1.5 horas de mecanica).
-            _escribir(ws, fila, 5, a_numero_decimal(cantidad))   # E
+            cant_dec = a_numero_decimal(cantidad)
+            _escribir(ws, fila, 5, cant_dec)   # E
+            # Si la cantidad tiene parte decimal, cambiar formato de la
+            # celda para que Excel lo muestre con decimales (ej "1,5")
+            # y no redondee visualmente (ej "2"). Si es entero, mantener
+            # el formato original de la plantilla.
+            try:
+                if isinstance(cant_dec, float) and cant_dec != int(cant_dec):
+                    ws.cell(row=fila, column=5).number_format = "0.##"
+            except Exception:
+                pass
             if a_numero(unitario):
                 _escribir(ws, fila, 6, a_numero(unitario))   # F
 
