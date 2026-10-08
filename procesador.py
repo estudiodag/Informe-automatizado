@@ -902,351 +902,282 @@ def _col_letra(n):
 
 def completar_plantilla(plantilla_bytes, data):
     """
-    Carga la plantilla virgen, la completa con los datos y devuelve los bytes.
-    Preserva logos/imagenes, estilos, formulas y formato de impresion.
-    Maneja correctamente las celdas combinadas (merged cells).
+    Carga la plantilla virgen (formato NUEVO: una sola hoja con todo),
+    la completa con los datos y devuelve los bytes del informe final.
+
+    Estructura de la plantilla:
+      - Filas 7-15: datos del encabezado (siniestro, asegurado, vehiculo,
+        taller, telefono/email).
+      - Fila 16: titulo "DESCRIPCIÓN DE DAÑOS".
+      - Fila 17: encabezados (ACCION / PIEZA / PRECIO).
+      - Filas 18-50: 33 filas disponibles para piezas.
+      - Fila 51: titulos "OBSERVACIONES" (A:C) y "COTIZACIÓN DE MANO DE
+        OBRA" (D:H).
+      - Filas 52-57: a la IZQUIERDA (A:C) van las observaciones; a la
+        DERECHA (D:H) van los items de mano de obra (5 filas:
+        Pintura, Chapa, Mecanica, Tapiceria, Varios).
+      - Filas 58-61: totales con FORMULAS que ya vienen en la plantilla
+        (NO tocar).
+
+    Las fórmulas G58 (MANO DE OBRA), G59 (REPUESTOS), G60 (FRANQUICIA)
+    y G61 (NETO) se calculan automáticamente en Excel.
     """
     wb = load_workbook(BytesIO(plantilla_bytes))
-    hojas = wb.worksheets
+    ws = wb.worksheets[0]  # Solo hay una hoja
 
-    # ---------- HOJA 1: Datos preliminares ----------
-    ws1 = hojas[0]
+    # ---------- 1) DATOS DEL ENCABEZADO ----------
+    # Mapeo de etiqueta -> celda donde va el VALOR (al lado derecho).
+    # La etiqueta esta en una celda y el valor en la siguiente, segun los
+    # merges detectados en la plantilla.
 
-    mapeo_hoja1 = [
-        (["NUMERO DE SINIESTRO", "NRO SINIESTRO"], data["numeroSiniestro"]),
-        (["FECHA DE SINIESTRO", "FECHA SINIESTRO"], data["fechaSiniestro"]),
-        (["FECHA DE INSPECCION", "FECHA INSPECCION"], data["fechaInspeccion"]),
-        (["APELLIDO Y NOMBRE"], data["asegurado"]),
-        (["MARCA"], data["marca"]),
-        (["MODELO"], data["modelo"]),
-        (["ANO", "ANIO"], data["anio"]),
-        (["DOMINIO", "PATENTE"], data["dominio"]),
-        (["CHASIS"], data["chasis"]),
-        (["KILOMETRAJE", "KILOMETRA"], data["kilometraje"]),
-        (["SUMA ASEGURADA", "SUMA ASEG"], data["sumaAsegurada"]),
-    ]
-    for etiquetas, valor in mapeo_hoja1:
-        if not valor:
-            continue
-        pos = _buscar_celda_etiqueta(ws1, etiquetas)
-        if pos is not None:
-            _escribir(ws1, pos[0], pos[1], valor)
+    # Fila 7: N° Siniestro | Nombre Aseg/Terc | Fecha IP
+    _escribir(ws, 7, 3, data.get("numeroSiniestro", ""))     # C7
+    _escribir(ws, 7, 5, data.get("asegurado", ""))           # E7:F7
+    _escribir(ws, 7, 8, data.get("fechaInspeccion", ""))     # H7
 
-    # ---- Datos del taller / lugar de inspeccion ----
-    # Se busca primero la fila de la seccion "DATOS DEL TALLER" y, a
-    # partir de ahi, las etiquetas NOMBRE/DIRECCION/LOCALIDAD. Asi no se
-    # confunde "NOMBRE" con el "APELLIDO Y NOMBRE" del asegurado.
-    fila_taller = None
-    for fila_celdas in ws1.iter_rows():
-        for celda in fila_celdas:
-            v = normalizar(celda.value)
-            if "DATOS DEL TALLER" in v or "LUGAR DE INSPECCION" in v:
-                fila_taller = celda.row
-                break
-        if fila_taller:
-            break
+    # Fila 9: Marca | Modelo | Año
+    _escribir(ws, 9, 2, data.get("marca", ""))               # B9:C9
+    _escribir(ws, 9, 5, data.get("modelo", ""))              # E9:F9
+    _escribir(ws, 9, 8, data.get("anio", ""))                # H9
 
-    if fila_taller is not None:
-        taller_map = [
-            (["NOMBRE"], data.get("tallerNombre", "")),
-            (["DIRECCION"], data.get("tallerDireccion", "")),
-            (["LOCALIDAD"], data.get("tallerLocalidad", "")),
-        ]
-        for etiquetas, valor in taller_map:
-            if not valor:
-                continue
-            # Buscar la etiqueta en las filas de la seccion del taller.
-            # El valor va en la primera celda vacia a la DERECHA de la
-            # etiqueta (saltando el ancho de celdas combinadas).
-            for fila_celdas in ws1.iter_rows(min_row=fila_taller,
-                                             max_row=fila_taller + 6):
-                encontrada = False
-                for celda in fila_celdas:
-                    et_ok = any(_es_celda_etiqueta(celda.value, et)
-                                for et in etiquetas)
-                    if not et_ok:
-                        continue
-                    # Punto de partida: columna siguiente al merge de
-                    # la etiqueta (o a la celda si no esta combinada).
-                    rango = _rango_de(ws1, celda.row, celda.column)
-                    col_ini = (rango.max_col + 1) if rango \
-                        else (celda.column + 1)
-                    destino = None
-                    for c in range(col_ini, col_ini + 9):
-                        if _valor_celda(ws1, celda.row, c) in (None, ""):
-                            destino = c
-                            break
-                    if destino is None:
-                        destino = col_ini
-                    _escribir(ws1, celda.row, destino, valor)
-                    encontrada = True
-                    break
-                if encontrada:
-                    break
+    # Fila 11: Dominio | Chasis | Suma aseg | Franq.
+    _escribir(ws, 11, 2, data.get("dominio", ""))            # B11
+    _escribir(ws, 11, 4, data.get("chasis", ""))             # D11
+    _escribir(ws, 11, 6, a_numero(data.get("sumaAsegurada", 0)))  # F11
+    franq = a_numero(data.get("franquicia", 0))
+    if franq:
+        _escribir(ws, 11, 8, franq)                          # H11
 
-    # Franquicia del vehiculo (1ra ocurrencia de "FRANQUICIA").
-    # Regla: si no hay valor, se escribe 0 (no se deja vacio).
-    franq_veh = a_numero(data.get("franquiciaVeh")) if data.get("franquiciaVeh") else 0
-    pos = _buscar_celda_etiqueta(ws1, ["FRANQUICIA"], ocurrencia=1)
-    if pos is not None:
-        _escribir(ws1, pos[0], pos[1], franq_veh)
+    # Fila 13: Taller | Dirección IP
+    _escribir(ws, 13, 2, data.get("tallerNombre", ""))       # B13:C13
+    _escribir(ws, 13, 5, data.get("tallerDireccion", ""))    # E13:H13
 
-    # Franquicia a deducir (2da ocurrencia, "FRANQUICIA:").
-    # La Hoja3 la lee desde aqui con una formula. Si no hay valor, va 0.
-    franq_ded = a_numero(data.get("franquicia")) if data.get("franquicia") else 0
-    pos = _buscar_celda_etiqueta(ws1, ["FRANQUICIA"], ocurrencia=2)
-    if pos is not None:
-        _escribir(ws1, pos[0], pos[1], franq_ded)
+    # Fila 15: Teléfono | Email
+    _escribir(ws, 15, 2, data.get("tallerTelefono", ""))     # B15:C15
+    _escribir(ws, 15, 5, data.get("tallerEmail", ""))        # E15:H15
 
-    # ---------- HOJA 2: Descripcion de danos ----------
-    # Si hay mas piezas de las que caben en una sola hoja, se clona la
-    # Hoja 2 (con su formato y logos) las veces que sea necesario.
-    PIEZAS_POR_HOJA = 30
+    # ---------- 2) PIEZAS (filas 18-50, max 33) ----------
+    FILA_INICIO_PIEZAS = 18
+    FILA_FIN_PIEZAS = 50  # inclusive
+    MAX_PIEZAS = FILA_FIN_PIEZAS - FILA_INICIO_PIEZAS + 1  # 33
 
-    if len(hojas) > 1 and data.get("danos"):
-        ws2 = hojas[1]
-        # Detectar la fila inicial y las columnas mirando los encabezados.
-        fila_inicio = None
-        col_accion = col_pieza = col_precio = None
-        for fila_celdas in ws2.iter_rows():
-            for celda in fila_celdas:
-                v = normalizar(celda.value)
-                if v in ("ACCION", "ACCION:"):
-                    fila_inicio = celda.row + 1
-                    col_accion = celda.column
-                if "PIEZA" in v:
-                    col_pieza = celda.column
-                if "PRECIO" in v:
-                    col_precio = celda.column
-            if fila_inicio:
-                break
+    danos = data.get("danos") or []
+    piezas_a_escribir = danos[:MAX_PIEZAS]
+    piezas_sobrantes = len(danos) - len(piezas_a_escribir)
 
-        if fila_inicio:
-            col_accion = col_accion or 1
-            col_pieza = col_pieza or 2
-            col_precio = col_precio or 6
+    for i, dano in enumerate(piezas_a_escribir):
+        fila = FILA_INICIO_PIEZAS + i
+        accion = (dano.get("accion") or "").upper()
+        pieza = dano.get("pieza", "")
+        _escribir(ws, fila, 1, accion)      # A: acción
+        _escribir(ws, fila, 2, pieza)       # B:F (merged): pieza
+        if accion == "CAMBIAR":
+            precio = a_numero(dano.get("precio", 0) or 0)
+            _escribir(ws, fila, 7, precio)  # G:H (merged): precio
 
-            total_piezas = len(data["danos"])
-            n_hojas = (total_piezas + PIEZAS_POR_HOJA - 1) // PIEZAS_POR_HOJA
+    # Si sobran piezas, en FASE 1 se guardan en observaciones como aviso.
+    # (En FASE 2 vamos a agregar la lógica para insertar filas extras.)
 
-            # 1) Crear primero todas las hojas necesarias (las extras son
-            #    clones de ws2 ANTES de escribir nada, para que el clon
-            #    no arrastre piezas ya escritas en la primera).
-            targets = [ws2]
-            for nh in range(1, n_hojas):
-                clon = wb.copy_worksheet(ws2)
-                clon.title = f"{ws2.title} ({nh + 1})"
-                _copiar_imagenes(ws2, clon)
-                _agregar_sufijo_titulo_danos(
-                    clon, f" (hoja {nh + 1} de piezas)")
-                targets.append(clon)
+    # ---------- 3) OBSERVACIONES (A52:C57 merged) ----------
+    # La plantilla tiene A52:C52, A53:C53... cada una merged por fila.
+    # Para que el texto largo entre bien, re-mergeamos A52:C57 como una
+    # sola celda grande.
+    _preparar_celda_observaciones(ws)
 
-            # 2) Recien ahora escribir las piezas en cada hoja.
-            for nh, ws_target in enumerate(targets):
-                inicio = nh * PIEZAS_POR_HOJA
-                fin = min(inicio + PIEZAS_POR_HOJA, total_piezas)
-                for i, dano in enumerate(data["danos"][inicio:fin]):
-                    fila = fila_inicio + i
-                    _escribir(ws_target, fila, col_accion, dano["accion"])
-                    _escribir(ws_target, fila, col_pieza, dano["pieza"])
-                    # Solo las piezas a CAMBIAR llevan precio.
-                    if dano["accion"] == "CAMBIAR":
-                        _escribir(ws_target, fila, col_precio,
-                                  dano.get("precio", 0) or 0)
+    obs = (data.get("observaciones") or "").strip()
+    if piezas_sobrantes > 0:
+        aviso = (f"[AVISO] El peritaje tiene {len(danos)} piezas pero "
+                 f"la plantilla solo soporta {MAX_PIEZAS}. Se cargaron "
+                 f"las primeras {MAX_PIEZAS}; faltan {piezas_sobrantes} "
+                 f"por agregar manualmente.")
+        obs = (aviso + "\n\n" + obs).strip() if obs else aviso
+    if obs:
+        _escribir(ws, 52, 1, obs)
+        # Habilitar wrap_text para que el texto largo se vea bien.
+        try:
+            from openpyxl.styles import Alignment
+            celda = ws.cell(row=52, column=1)
+            celda.alignment = Alignment(
+                wrap_text=True,
+                vertical="top",
+                horizontal=(celda.alignment.horizontal if celda.alignment
+                            else "left")
+            )
+        except Exception:
+            pass
 
-    # ---------- HOJA 3: Mano de obra, resumen, observaciones ----------
-    if len(hojas) > 2:
-        ws3 = hojas[2]
+    # ---------- 4) MANO DE OBRA (filas 53-57) ----------
+    # D = CONCEPTO, E = CANT., F = V. UNITARIO, G:H (merged) = SUBTOTAL
+    # NO tocar G (es formula =E*F que ya viene en la plantilla).
+    FILA_INICIO_MO = 53
+    FILA_FIN_MO = 57
+    MAX_MO = FILA_FIN_MO - FILA_INICIO_MO + 1  # 5 filas
 
-        # ---- Total Repuestos: como FORMULA ----
-        # En lugar de escribir un numero fijo, escribimos =SUM(...) de
-        # las celdas de precio de las piezas. Si hay una sola hoja de
-        # piezas: =SUM(Hoja2!F12:F41). Si hay clones: se suman todas.
-        formula_repuestos = _formula_total_repuestos(hojas, data)
-        for fila_celdas in ws3.iter_rows():
-            encontrada = False
-            for celda in fila_celdas:
-                if "TOTAL REPUESTOS" in normalizar(celda.value):
-                    rango = _rango_de(ws3, celda.row, celda.column)
-                    col_valor = (rango.max_col + 1) if rango \
-                        else (celda.column + 1)
-                    _escribir(ws3, celda.row, col_valor, formula_repuestos)
-                    encontrada = True
-                    break
-            if encontrada:
-                break
-
-        def _buscar_cols_cant_vu(fila_concepto):
-            """Busca las columnas CANT. y V. UNITARIO mirando filas de arriba."""
-            col_cant = col_vu = None
-            for r in range(max(1, fila_concepto - 6), fila_concepto):
-                for c in range(1, 12):
-                    hv = normalizar(_valor_celda(ws3, r, c))
-                    if "CANT" in hv:
-                        col_cant = c
-                    if "UNITARIO" in hv or "V. UNIT" in hv:
-                        col_vu = c
-            return col_cant, col_vu
-
-        # ---- Mano de obra: modo FLEXIBLE (items del peritaje) o CLASICO ----
-        items_mo = data.get("manoObra_items") or []
-
-        if items_mo:
-            # MODO FLEXIBLE: escribir los items tal cual vinieron del
-            # peritaje. Detectamos la zona "COTIZACION DE MANO DE OBRA"
-            # y volcamos hasta 5 items ahi (respetando el orden).
-            fila_inicio_items = None
-            col_concepto = 1
-            col_unidad = None
-            col_cant = None
-            col_vu = None
-            for fila_celdas in ws3.iter_rows():
-                for celda in fila_celdas:
-                    v = normalizar(celda.value)
-                    if v == "CONCEPTO":
-                        fila_inicio_items = celda.row + 1
-                        col_concepto = celda.column
-                        col_cant, col_vu = _buscar_cols_cant_vu(
-                            celda.row + 1)
-                        # Detectar columna de "unidad" mirando esa
-                        # misma fila de headers.
-                        for c2 in range(1, 12):
-                            hv = normalizar(_valor_celda(ws3, celda.row, c2))
-                            if hv == "UNIDAD":
-                                col_unidad = c2
-                                break
-                if fila_inicio_items:
-                    break
-            # Fallback si no encontramos "CONCEPTO": arrancar en fila 12
-            # con las columnas típicas.
-            if not fila_inicio_items:
-                fila_inicio_items = 12
-                col_concepto = 1
-                col_unidad = col_unidad or 3
-                col_cant = col_cant or 4
-                col_vu = col_vu or 5
-
-            # Detectar la columna de unidad si no la encontramos: usar
-            # una columna intermedia (típicamente C).
-            if col_unidad is None:
-                col_unidad = 3
-
-            # Escribir hasta 5 items en las filas disponibles.
-            MAX_FILAS_MO = 5
-            for i, item in enumerate(items_mo[:MAX_FILAS_MO]):
-                fila = fila_inicio_items + i
-                _escribir(ws3, fila, col_concepto, item["concepto"])
-                if col_unidad and item.get("unidad"):
-                    _escribir(ws3, fila, col_unidad, item["unidad"])
-                if col_cant:
-                    _escribir(ws3, fila, col_cant, item["cantidad"])
-                if col_vu:
-                    _escribir(ws3, fila, col_vu, item["unitario"])
-
-            # Filas sobrantes (menos de 5 items): dejar cantidad y
-            # unitario en 0 para que el subtotal quede en 0.
-            for i in range(len(items_mo), MAX_FILAS_MO):
-                fila = fila_inicio_items + i
-                if col_cant:
-                    _escribir(ws3, fila, col_cant, 0)
-                if col_vu:
-                    _escribir(ws3, fila, col_vu, 0)
+    def _escribir_mo(fila, concepto, cantidad, unitario):
+        """
+        Escribe una fila de mano de obra. Las filas 53-56 tienen formula
+        G=E*F que se calcula sola. La fila 57 ("Varios") tiene E57:F57
+        mergeadas, asi que no se puede escribir cantidad/unitario por
+        separado: ahi se escribe el TOTAL directamente en G57 (sin
+        formula), que igualmente entra en el SUM de G58.
+        """
+        _escribir(ws, fila, 4, concepto or "")
+        if fila == 57:
+            # Fila especial "Varios": E57:F57 mergeado. Escribir total
+            # directo en G57 (merged G57:H57).
+            total = a_numero(cantidad) * a_numero(unitario)
+            if total == 0 and a_numero(unitario) > 0:
+                # Si solo vino el monto como "unitario" (sin cantidad),
+                # usar ese valor como total.
+                total = a_numero(unitario)
+            if total:
+                _escribir(ws, fila, 7, total)   # G57
         else:
-            # MODO CLASICO: los 4 conceptos fijos + varios (cuando no
-            # hay peritaje Excel).
-            mo = data["manoObra"]
+            _escribir(ws, fila, 5, a_numero(cantidad))   # E
+            if a_numero(unitario):
+                _escribir(ws, fila, 6, a_numero(unitario))   # F
 
-            def set_mano_obra(nombre_concepto, cantidad, valor_unitario):
-                objetivo = normalizar(nombre_concepto)
-                for fila_celdas in ws3.iter_rows():
-                    for celda in fila_celdas:
-                        if normalizar(celda.value) == objetivo:
-                            col_cant, col_vu = _buscar_cols_cant_vu(celda.row)
-                            if col_cant:
-                                _escribir(ws3, celda.row, col_cant, cantidad)
-                            if col_vu and valor_unitario:
-                                _escribir(ws3, celda.row, col_vu, valor_unitario)
-                            return
+    items_mo = data.get("manoObra_items") or []
+    if items_mo:
+        # Modo flexible: usar los items tal cual los trajo el peritaje.
+        for i, item in enumerate(items_mo[:MAX_MO]):
+            fila = FILA_INICIO_MO + i
+            _escribir_mo(fila, item.get("concepto", ""),
+                         item.get("cantidad", 0),
+                         item.get("unitario", 0))
+        # Filas sobrantes: dejar cantidad y unitario en 0.
+        for i in range(len(items_mo), MAX_MO):
+            fila = FILA_INICIO_MO + i
+            if fila != 57:
+                _escribir(ws, fila, 5, 0)
+                _escribir(ws, fila, 6, 0)
+    else:
+        # Modo clasico: usar manoObra con los 4 conceptos fijos + varios.
+        mo = data.get("manoObra") or {}
+        conceptos = [
+            ("Pintura",  mo.get("pintura", 0),   mo.get("pinturaValor", 0)),
+            ("Chapa",    mo.get("chapa", 0),     mo.get("chapaValor", 0)),
+            ("Mecanica", mo.get("mecanica", 0),  mo.get("mecanicaValor", 0)),
+            ("Tapiceria",mo.get("tapiceria", 0), mo.get("tapiceriaValor", 0)),
+            # Varios: en modo clasico viene como monto directo. Se maneja
+            # en _escribir_mo (va a G57 como total).
+            ("Varios",   0, mo.get("varios", 0)),
+        ]
+        for i, (concepto, cant, unit) in enumerate(conceptos[:MAX_MO]):
+            fila = FILA_INICIO_MO + i
+            _escribir_mo(fila, concepto, cant, unit)
 
-            set_mano_obra("Pintura", mo["pintura"], mo["pinturaValor"])
-            set_mano_obra("Chapa", mo["chapa"], mo["chapaValor"])
-            set_mano_obra("Mecanica", mo["mecanica"], mo["mecanicaValor"])
-            set_mano_obra("Tapiceria", mo["tapiceria"], mo["tapiceriaValor"])
-
-            if mo["varios"]:
-                for fila_celdas in ws3.iter_rows():
-                    for celda in fila_celdas:
-                        if normalizar(celda.value) == "VARIOS":
-                            col_cant, col_vu = _buscar_cols_cant_vu(celda.row)
-                            if col_cant:
-                                _escribir(ws3, celda.row, col_cant, 1)
-                            if col_vu:
-                                _escribir(ws3, celda.row, col_vu, mo["varios"])
-
-        # Franquicia a deducir: se escribe en la celda destino al lado
-        # de la etiqueta. Si esa celda tiene una formula (ej: apunta a
-        # Hoja1), la sobrescribimos con el valor real, asi el monto
-        # queda visible en su lugar dentro del cuadro.
-        if data.get("franquicia"):
-            for fila_celdas in ws3.iter_rows():
-                for celda in fila_celdas:
-                    if "FRANQUICIA A DEDUCIR" in normalizar(celda.value):
-                        for c in range(celda.column + 1, celda.column + 9):
-                            val = _valor_celda(ws3, celda.row, c)
-                            es_formula = isinstance(val, str) and val.startswith("=")
-                            if es_formula or val in (None, ""):
-                                _escribir(ws3, celda.row, c, data["franquicia"])
-                                break
-                        break
-
-        # Observaciones: la etiqueta "OBSERVACIONES" suele estar en una celda
-        # combinada. El texto va en el area (merge) inmediatamente debajo,
-        # NUNCA sobre la etiqueta misma.
-        if data.get("observaciones"):
-            for fila_celdas in ws3.iter_rows():
-                hecho = False
-                for celda in fila_celdas:
-                    if normalizar(celda.value) == "OBSERVACIONES":
-                        # Si la etiqueta esta en un merge, escribir en la
-                        # primera fila despues de ese rango combinado.
-                        rango = _rango_de(ws3, celda.row, celda.column)
-                        if rango is not None:
-                            fila_dest = rango.max_row + 1
-                        else:
-                            fila_dest = celda.row + 1
-                        _escribir(ws3, fila_dest, celda.column,
-                                  data["observaciones"])
-                        hecho = True
-                        break
-                if hecho:
-                    break
-
-    # Guardar a bytes.
+    # ---------- 5) GUARDAR ----------
     salida = BytesIO()
     wb.save(salida)
     salida.seek(0)
     generado = salida.read()
 
-    # FIX hojas clonadas: openpyxl genera el drawing.xml de las hojas
-    # extras con metadatos que Excel a veces no renderiza. Pisamos el
-    # XML del drawing con una copia exacta del de la hoja origen, con
-    # cNvPr ids unicos.
-    if len(hojas) > 1:
-        titulo_origen = hojas[1].title  # ej: "Hoja2"
-        # Hojas clonadas: las que en el wb final empiecen con
-        # "<titulo_origen> (" (ej: "Hoja2 (2)").
-        clones = [ws.title for ws in wb.worksheets
-                  if ws.title != titulo_origen
-                  and ws.title.startswith(titulo_origen + " (")]
-        if clones:
-            generado = _arreglar_drawings_en_zip(
-                generado, titulo_origen, clones)
+    # PRESERVAR LOGOS: openpyxl a veces no copia las imagenes de la
+    # plantilla al guardar. _reinyectar_imagenes las copia desde la
+    # plantilla original a nivel ZIP, si faltan.
+    generado = _reinyectar_imagenes(plantilla_bytes, generado)
 
-    # PRESERVAR LOGOS: si openpyxl perdio las imagenes al guardar
-    # (ocurre en algunos entornos), se reinyectan desde la plantilla.
-    # Si openpyxl ya las conservo, esta funcion no hace nada.
-    return _reinyectar_imagenes(plantilla_bytes, generado)
+    # Arreglar Content_Types.xml DESPUES de reinyectar las imagenes:
+    # openpyxl a veces se olvida de declarar las extensiones (ej:
+    # jpeg) y Excel no puede abrir el archivo. Esto garantiza que
+    # cada extension de imagen presente tenga su ContentType.
+    generado = _arreglar_content_types_imagenes(generado)
 
+    return generado
+
+
+def _arreglar_content_types_imagenes(archivo_bytes):
+    """
+    Asegura que [Content_Types].xml declare el ContentType para cada
+    extension de imagen presente en xl/media/. Sin esta declaracion,
+    Excel se queja al abrir el archivo (ventana "Hemos encontrado un
+    problema con el contenido de...").
+    """
+    try:
+        import zipfile
+        import re as _re
+        from io import BytesIO as _BIO
+
+        zin = zipfile.ZipFile(_BIO(archivo_bytes), "r")
+        try:
+            nombres = zin.namelist()
+            ct_xml = zin.read("[Content_Types].xml").decode("utf-8")
+
+            # Extensiones de imagenes en el ZIP
+            extensiones = set()
+            for n in nombres:
+                if n.startswith("xl/media/") and "." in n:
+                    ext = n.rsplit(".", 1)[1].lower()
+                    extensiones.add(ext)
+
+            if not extensiones:
+                return archivo_bytes
+
+            # Mapa de extension -> content type
+            mimes = {
+                "jpeg": "image/jpeg",
+                "jpg":  "image/jpeg",
+                "png":  "image/png",
+                "gif":  "image/gif",
+                "bmp":  "image/bmp",
+                "tiff": "image/tiff",
+                "tif":  "image/tiff",
+                "emf":  "image/x-emf",
+                "wmf":  "image/x-wmf",
+            }
+
+            extras = ""
+            for ext in extensiones:
+                if f'Extension="{ext}"' not in ct_xml and ext in mimes:
+                    extras += (f'<Default Extension="{ext}" '
+                               f'ContentType="{mimes[ext]}"/>')
+
+            if not extras:
+                return archivo_bytes
+
+            ct_nuevo = ct_xml.replace("</Types>", extras + "</Types>")
+        finally:
+            zin.close()
+
+        # Reescribir el ZIP con el Content_Types corregido
+        salida = _BIO()
+        zin = zipfile.ZipFile(_BIO(archivo_bytes), "r")
+        zout = zipfile.ZipFile(salida, "w", zipfile.ZIP_DEFLATED)
+        try:
+            for item in zin.infolist():
+                if item.filename == "[Content_Types].xml":
+                    zout.writestr(item, ct_nuevo.encode("utf-8"))
+                else:
+                    zout.writestr(item, zin.read(item.filename))
+        finally:
+            zin.close()
+            zout.close()
+        return salida.getvalue()
+    except Exception:
+        return archivo_bytes
+
+
+def _preparar_celda_observaciones(ws):
+    """
+    Las observaciones ocupan A52:C57 en la plantilla, pero vienen con
+    cada fila mergeada por separado (A52:C52, A53:C53, ...). Para que
+    un texto largo con wrap_text se vea bien en una sola celda alta,
+    des-mergeamos las 6 filas y las re-mergeamos como una sola gran
+    celda A52:C57.
+    """
+    try:
+        # Rangos individuales a quitar.
+        a_quitar = [f"A{r}:C{r}" for r in range(52, 58)]
+        for rango in a_quitar:
+            if rango in {str(m) for m in ws.merged_cells.ranges}:
+                ws.unmerge_cells(rango)
+        # Mergear como una sola celda grande.
+        ws.merge_cells("A52:C57")
+    except Exception:
+        # Si falla, se escribe el texto en A52 igual. Puede truncarse
+        # visualmente pero el dato queda guardado.
+        pass
 
 
 # ============================================================
