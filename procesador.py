@@ -56,6 +56,7 @@ def data_vacia():
         "asegurado": "", "marca": "", "modelo": "", "anio": "", "dominio": "",
         "chasis": "", "kilometraje": "", "sumaAsegurada": "", "franquiciaVeh": "",
         "tallerNombre": "", "tallerDireccion": "", "tallerLocalidad": "",
+        "tallerTelefono": "", "tallerEmail": "",
         "danos": [],  # lista de {accion, pieza, precio}
         "manoObra": {
             "pintura": 0, "chapa": 0, "mecanica": 0, "tapiceria": 0, "varios": 0,
@@ -284,6 +285,199 @@ def _mejorar_observaciones(texto):
         # Si falla la llamada, al menos devolver el texto limpio
         # (sin tabs multiples), que es mejor que el crudo.
         return texto_limpio
+
+
+def extraer_encabezado_desde_adjuntos(archivos, texto_opcional=""):
+    """
+    Extrae los datos del encabezado desde adjuntos (PDF, imágenes) y
+    opcionalmente texto pegado, usando Claude Vision.
+
+    archivos: lista de dicts {"nombre": str, "bytes": bytes}.
+    texto_opcional: texto adicional pegado por el usuario (puede ser "").
+
+    Devuelve un dict con los campos encontrados (los que falten vienen
+    como ""). Si no hay nada que procesar o la llamada falla, devuelve
+    un dict vacío (no rompe el flujo del informe).
+
+    Campos extraídos: numeroSiniestro, asegurado, marca, modelo, anio,
+    dominio, chasis, sumaAsegurada, franquicia, tallerTelefono,
+    tallerEmail. NO extrae tallerDireccion ni fechaInspeccion (esos los
+    carga el perito a mano).
+    """
+    vacio = {}
+    archivos = archivos or []
+    texto_opcional = (texto_opcional or "").strip()
+
+    if not archivos and not texto_opcional:
+        return vacio
+
+    try:
+        # 1) Convertir cada archivo a una o varias imágenes PNG (base64).
+        imagenes = []  # lista de dicts {"media_type": str, "data": b64}
+        for arch in archivos[:5]:  # tope de 5 archivos
+            nombre = (arch.get("nombre") or "").lower()
+            datos = arch.get("bytes") or b""
+            if not datos:
+                continue
+            if nombre.endswith(".pdf") or datos[:4] == b"%PDF":
+                # Convertir PDF a imágenes (máx 5 páginas)
+                imgs_pdf = _pdf_a_imagenes_base64(datos, max_paginas=5)
+                imagenes.extend(imgs_pdf)
+            else:
+                # Imagen directa (jpg, png, etc.)
+                b64 = _imagen_a_base64(datos)
+                media_type = _detectar_media_type(datos, nombre)
+                if b64 and media_type:
+                    imagenes.append({"media_type": media_type, "data": b64})
+            if len(imagenes) >= 10:  # tope global
+                break
+
+        if not imagenes and not texto_opcional:
+            return vacio
+
+        # 2) Preparar el contenido multimodal para Claude.
+        contenido = []
+        for img in imagenes[:10]:
+            contenido.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img["media_type"],
+                    "data": img["data"],
+                },
+            })
+
+        prompt_texto = (
+            "Analizá los documentos adjuntos (y el texto opcional al "
+            "final, si hay) y extraé los datos del siniestro para "
+            "cargarlos en un informe de tasación.\n\n"
+            "Devolvé SOLO un objeto JSON válido con estos campos. Si un "
+            "dato no aparece en los documentos, dejá el string vacío "
+            '"":\n'
+            "{\n"
+            '  "numeroSiniestro": "numero de siniestro, pieza, PZA o STRO",\n'
+            '  "asegurado": "nombre completo del asegurado o cliente",\n'
+            '  "marca": "marca del vehiculo (FORD, CHEVROLET, etc.)",\n'
+            '  "modelo": "modelo del vehiculo (KA, CRUZE, etc.)",\n'
+            '  "anio": "año del vehiculo (4 digitos)",\n'
+            '  "dominio": "patente/dominio (ej: AB779VJ)",\n'
+            '  "chasis": "numero de chasis",\n'
+            '  "sumaAsegurada": "suma asegurada en pesos, SOLO el numero entero sin $ ni puntos",\n'
+            '  "franquicia": "franquicia en pesos, SOLO el numero entero sin $ ni puntos",\n'
+            '  "tallerTelefono": "telefono de contacto",\n'
+            '  "tallerEmail": "email de contacto"\n'
+            "}\n\n"
+            "REGLAS:\n"
+            "- Devolvé SOLO el JSON, sin texto antes ni despues, sin "
+            "markdown, sin comentarios.\n"
+            "- Los montos SOLO como numero entero (ej: 15638400, no "
+            "'$15.638.400').\n"
+            "- Si un dato aparece de varias formas, elegí la mas "
+            "completa.\n"
+            "- 'numeroSiniestro' puede figurar como 'N° Siniestro', "
+            "'Pieza', 'PZA', 'STRO', 'Siniestro N°'.\n"
+            "- Para marcas y modelos: usar la forma mas comun (FORD, no "
+            "'Ford Motor Company').\n"
+        )
+        if texto_opcional:
+            prompt_texto += (
+                "\n--- TEXTO ADICIONAL PEGADO POR EL USUARIO ---\n"
+                + texto_opcional
+            )
+
+        contenido.append({"type": "text", "text": prompt_texto})
+
+        # 3) Llamar a Claude Vision.
+        cliente = _cliente_claude()
+        resp = cliente.messages.create(
+            model=MODELO_CLAUDE,
+            max_tokens=1500,
+            messages=[{"role": "user", "content": contenido}],
+        )
+        salida = "".join(
+            b.text for b in resp.content
+            if getattr(b, "type", None) == "text"
+        ).strip()
+
+        parsed = _extraer_json(salida)
+
+        # 4) Normalizar los campos esperados.
+        campos = ("numeroSiniestro", "asegurado", "marca", "modelo",
+                  "anio", "dominio", "chasis", "sumaAsegurada",
+                  "franquicia", "tallerTelefono", "tallerEmail")
+        resultado = {}
+        for k in campos:
+            v = parsed.get(k, "")
+            if v is None:
+                v = ""
+            resultado[k] = str(v).strip() if not isinstance(v, (int, float)) else v
+        # Montos siempre como número
+        for k in ("sumaAsegurada", "franquicia"):
+            resultado[k] = a_numero(resultado[k])
+
+        return resultado
+    except Exception:
+        # Si algo falla, no rompemos el flujo del informe.
+        return vacio
+
+
+def _pdf_a_imagenes_base64(pdf_bytes, max_paginas=5, dpi=150):
+    """
+    Convierte un PDF a imágenes PNG en base64 (una por página).
+    Limita a max_paginas y usa dpi moderado para no inflar el payload.
+    """
+    try:
+        import pymupdf  # type: ignore
+        import base64 as _b64
+        imagenes = []
+        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+        try:
+            total = min(len(doc), max_paginas)
+            # matrix para escalar a dpi deseado (72 dpi = base)
+            escala = dpi / 72.0
+            mat = pymupdf.Matrix(escala, escala)
+            for i in range(total):
+                page = doc.load_page(i)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                png_bytes = pix.tobytes("png")
+                imagenes.append({
+                    "media_type": "image/png",
+                    "data": _b64.b64encode(png_bytes).decode("ascii"),
+                })
+        finally:
+            doc.close()
+        return imagenes
+    except Exception:
+        return []
+
+
+def _imagen_a_base64(datos):
+    """Convierte bytes de imagen a string base64 ASCII."""
+    try:
+        import base64 as _b64
+        return _b64.b64encode(datos).decode("ascii")
+    except Exception:
+        return ""
+
+
+def _detectar_media_type(datos, nombre):
+    """Detecta el media type de una imagen por firma o extensión."""
+    # Firmas conocidas
+    if datos[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if datos[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if datos[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if datos[:4] == b"RIFF" and datos[8:12] == b"WEBP":
+        return "image/webp"
+    # Fallback por extensión
+    ext = nombre.rsplit(".", 1)[-1].lower() if "." in nombre else ""
+    mapa = {
+        "jpg": "image/jpeg", "jpeg": "image/jpeg",
+        "png": "image/png", "gif": "image/gif", "webp": "image/webp",
+    }
+    return mapa.get(ext, "")
 
 
 def _fecha_dd_mm_aaaa(valor):

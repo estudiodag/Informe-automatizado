@@ -264,6 +264,30 @@ def procesar_informe():
         else:
             return jsonify({"error": "Elegi una plantilla (Agrosalta o Cooperacion)"}), 400
 
+        # --- Adjuntos del ENCABEZADO (paso 1): PDF/imagenes + texto ---
+        # Lee los datos del siniestro (nº, asegurado, vehiculo, chasis,
+        # suma, franquicia, telefono) desde documentos adjuntos (pedidos
+        # de inspeccion, caratulas de poliza, etc.) usando Claude Vision.
+        encab_texto = request.form.get("encab_texto", "").strip()
+        encab_archivos = []
+        for key in request.files:
+            if key.startswith("encab_adjunto"):
+                for f in request.files.getlist(key):
+                    if f and f.filename:
+                        encab_archivos.append({
+                            "nombre": f.filename,
+                            "bytes": f.read(),
+                        })
+
+        datos_encabezado = {}
+        if encab_texto or encab_archivos:
+            try:
+                from procesador import extraer_encabezado_desde_adjuntos
+                datos_encabezado = extraer_encabezado_desde_adjuntos(
+                    encab_archivos, encab_texto) or {}
+            except Exception:
+                datos_encabezado = {}
+
         # --- Peritaje: texto pegado y/o archivo Excel ---
         texto = request.form.get("texto", "").strip()
 
@@ -313,9 +337,14 @@ def procesar_informe():
                               + texto_excel_cabecera)
                     texto = (texto + bloque).strip()
 
-        if not texto:
+        # Permitir generar el informe solo con el encabezado (precargar
+        # datos del siniestro antes de la inspeccion). Si no hay nada
+        # de nada (ni peritaje ni encabezado), si falla.
+        if not texto and not datos_encabezado:
             return jsonify({
-                "error": "Carga el texto del peritaje o subi el Excel de peritacion"
+                "error": ("Cargá al menos uno: documentos del siniestro "
+                          "(paso 2), texto del peritaje o Excel de "
+                          "peritación (paso 3).")
             }), 400
 
         # --- Cotizacion (solo texto pegado; el upload de archivos en
@@ -343,6 +372,13 @@ def procesar_informe():
             overrides["tallerDireccion"] = dir_insp
         if loc_insp:
             overrides["tallerLocalidad"] = loc_insp
+
+        # Los datos extraidos de los adjuntos del encabezado tienen
+        # prioridad sobre lo que haya inferido Claude del peritaje
+        # (son documentos oficiales de la aseguradora).
+        for k, v in (datos_encabezado or {}).items():
+            if v not in (None, "", 0):
+                overrides[k] = v
 
         informe_bytes, data, _ = procesar(
             plantilla_bytes,
