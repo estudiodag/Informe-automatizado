@@ -274,7 +274,10 @@ def parsear_peritaje_excel(datos, nombre_archivo):
 
     sectores = _detectar_sectores(celdas)
     if not sectores:
-        return None
+        # Fallback: puede ser el formato DAG (informe ya pre-cargado
+        # con tabla ACCION | PIEZA | PRECIO en lugar de grilla de
+        # sectores). Lo probamos antes de rendirnos.
+        return _parsear_formato_dag(celdas)
 
     # Agrupar sectores por columna para saber dónde termina cada uno.
     por_columna = {}
@@ -307,6 +310,176 @@ def parsear_peritaje_excel(datos, nombre_archivo):
         resultado["observaciones"] = observaciones
 
     return resultado
+
+
+def _parsear_formato_dag(celdas):
+    """
+    Parser para el formato DAG: un informe de tasacion ya pre-cargado
+    con la plantilla propia (columnas A=ACCION, B=PIEZA, G=PRECIO)
+    en lugar de la grilla de sectores de las aseguradoras.
+
+    Caracteristicas:
+      - A17=ACCION, B17=PIEZA, G17=PRECIO (headers de la tabla).
+      - Filas 18+ con A={CAMBIAR, REPARAR}, B=nombre pieza, G=precio.
+      - Mano de obra en una segunda tabla (D=CONCEPTO, E=CANT.,
+        F=V.UNITARIO) despues de "COTIZACION DE MANO DE OBRA".
+
+    Devuelve dict con "danos" y "manoObra_items", o None si tampoco
+    detecta este formato.
+    """
+    # 1) Localizar la fila header "ACCION | PIEZA | PRECIO".
+    fila_header = None
+    col_accion = col_pieza = col_precio = None
+    for (r, c), v in celdas.items():
+        if not isinstance(v, str):
+            continue
+        texto = v.strip().upper()
+        texto = texto.replace("Ó", "O").replace("Á", "A")
+        if texto in ("ACCION", "ACCION:"):
+            fila_header = r
+            col_accion = c
+    if fila_header is None:
+        return None
+
+    # Buscar las columnas PIEZA y PRECIO en la misma fila
+    for c in range(col_accion, col_accion + 15):
+        v = celdas.get((fila_header, c))
+        if not isinstance(v, str):
+            continue
+        texto = v.strip().upper().replace("Ó", "O").replace("Á", "A")
+        if "PIEZA" in texto and col_pieza is None:
+            col_pieza = c
+        if "PRECIO" in texto:
+            col_precio = c
+
+    if col_pieza is None:
+        return None
+    if col_precio is None:
+        col_precio = col_pieza + 5  # fallback a la columna G si A=1 B=2
+
+    # 2) Leer las piezas en las filas debajo del header, hasta encontrar
+    #    una fila sin accion o un header de otra seccion.
+    danos = []
+    STOP = ("OBSERVACIONES", "COTIZACION", "MANO DE OBRA", "RESUMEN")
+    for r in sorted(set(rr for (rr, _) in celdas.keys() if rr > fila_header)):
+        v_accion = celdas.get((r, col_accion))
+        v_pieza = celdas.get((r, col_pieza))
+        # Si en esta fila aparece alguna etiqueta de STOP, cortar.
+        detener = False
+        for c in range(20):
+            vv = celdas.get((r, c))
+            if isinstance(vv, str):
+                vu = vv.strip().upper().replace("Ó","O").replace("Á","A")
+                if any(st in vu for st in STOP):
+                    detener = True
+                    break
+        if detener:
+            break
+        if not v_accion or not v_pieza:
+            continue
+        accion = str(v_accion).strip().upper()
+        if accion not in ("CAMBIAR", "REPARAR"):
+            continue
+        pieza = str(v_pieza).strip()
+        if not pieza:
+            continue
+        precio = 0
+        if accion == "CAMBIAR":
+            precio = _a_numero(celdas.get((r, col_precio)))
+        danos.append({
+            "accion": accion,
+            "pieza": pieza,
+            "precio": precio,
+        })
+
+    if not danos:
+        return None
+
+    resultado = {"danos": danos}
+
+    # 3) Mano de obra: buscar la zona "COTIZACION DE MANO DE OBRA".
+    items_mo = _extraer_mo_formato_dag(celdas)
+    if items_mo:
+        resultado["manoObra_items"] = items_mo
+
+    # 4) Observaciones (si las hay).
+    obs = _extraer_observaciones(celdas)
+    if obs:
+        resultado["observaciones"] = obs
+
+    return resultado
+
+
+def _extraer_mo_formato_dag(celdas):
+    """
+    Lee la seccion de mano de obra del formato DAG:
+      D52=CONCEPTO | E52=CANT. | F52=V.UNITARIO | G52=SUBTOTAL
+      D53+ = items con concepto, cantidad, unitario.
+    """
+    # Localizar la fila header "CONCEPTO".
+    fila_header = None
+    col_concepto = col_cant = col_unit = None
+    for (r, c), v in celdas.items():
+        if not isinstance(v, str):
+            continue
+        texto = v.strip().upper()
+        if texto == "CONCEPTO":
+            fila_header = r
+            col_concepto = c
+
+    if fila_header is None:
+        return []
+
+    # Buscar columnas CANT. y V.UNITARIO
+    for c in range(col_concepto, col_concepto + 15):
+        v = celdas.get((fila_header, c))
+        if not isinstance(v, str):
+            continue
+        texto = v.strip().upper().replace(".","")
+        if "CANT" in texto and col_cant is None:
+            col_cant = c
+        if "UNITARIO" in texto or "V UNIT" in texto:
+            col_unit = c
+
+    if col_cant is None:
+        col_cant = col_concepto + 1
+    if col_unit is None:
+        col_unit = col_concepto + 2
+
+    # Leer items (hasta 10 filas o hasta que aparezca algo como "MANO DE OBRA" / "REPUESTOS" en col_unit-1)
+    items = []
+    STOP = ("MANO DE OBRA", "REPUESTOS", "FRANQUICIA", "NETO", "TOTAL")
+    for r in range(fila_header + 1, fila_header + 15):
+        concepto = celdas.get((r, col_concepto))
+        if not isinstance(concepto, str) or not concepto.strip():
+            # Puede ser una fila con otro texto adyacente (ej F58=MANO DE OBRA);
+            # revisamos y cortamos si corresponde.
+            for c in range(col_concepto + 1, col_concepto + 10):
+                vv = celdas.get((r, c))
+                if isinstance(vv, str):
+                    vu = vv.strip().upper()
+                    if any(st in vu for st in STOP):
+                        return items
+            continue
+        if concepto.strip().upper() in [s for s in STOP]:
+            break
+        cant = _a_numero_decimal(celdas.get((r, col_cant)))
+        unit = _a_numero(celdas.get((r, col_unit)))
+        # Si cant y unit son 0, puede ser un item "monto directo"
+        # (ej "Carga A/A $150000") donde el total esta en SUBTOTAL
+        # (col_unit + 1). Si hay valor ahi, usarlo como unitario con
+        # cantidad = 0 para que el procesador escriba el total en G.
+        if cant == 0 and unit == 0:
+            subtotal = _a_numero(celdas.get((r, col_unit + 1)))
+            if subtotal > 0:
+                unit = subtotal
+        items.append({
+            "concepto": concepto.strip(),
+            "unidad": "",
+            "cantidad": cant,
+            "unitario": unit,
+        })
+    return items
 
 
 def _extraer_observaciones(celdas):
