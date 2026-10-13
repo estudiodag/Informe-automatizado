@@ -1345,12 +1345,13 @@ def completar_plantilla(plantilla_bytes, data):
             # Cantidades pueden ser decimales (ej: 1.5 horas de mecanica).
             cant_dec = a_numero_decimal(cantidad)
             _escribir(ws, fila, 5, cant_dec)   # E
-            # SIEMPRE poner formato que permita decimales en la celda E,
-            # aunque el valor actual sea entero. Asi si el usuario edita
-            # la celda y pone 8,5, Excel no la redondea a 9.
-            # "0.##" muestra enteros como "2" y decimales como "1,5".
+            # Usar formato "General" para que:
+            #  - 6 se muestre como "6" (sin coma)
+            #  - 8.5 se muestre como "8,5"
+            # El formato "0.##" en Excel español deja una coma visible
+            # para enteros (se ve "6,") que molesta. "General" no.
             try:
-                ws.cell(row=fila, column=5).number_format = "0.##"
+                ws.cell(row=fila, column=5).number_format = "General"
             except Exception:
                 pass
             if a_numero(unitario):
