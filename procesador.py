@@ -1345,13 +1345,12 @@ def completar_plantilla(plantilla_bytes, data):
             # Cantidades pueden ser decimales (ej: 1.5 horas de mecanica).
             cant_dec = a_numero_decimal(cantidad)
             _escribir(ws, fila, 5, cant_dec)   # E
-            # Si la cantidad tiene parte decimal, cambiar formato de la
-            # celda para que Excel lo muestre con decimales (ej "1,5")
-            # y no redondee visualmente (ej "2"). Si es entero, mantener
-            # el formato original de la plantilla.
+            # SIEMPRE poner formato que permita decimales en la celda E,
+            # aunque el valor actual sea entero. Asi si el usuario edita
+            # la celda y pone 8,5, Excel no la redondea a 9.
+            # "0.##" muestra enteros como "2" y decimales como "1,5".
             try:
-                if isinstance(cant_dec, float) and cant_dec != int(cant_dec):
-                    ws.cell(row=fila, column=5).number_format = "0.##"
+                ws.cell(row=fila, column=5).number_format = "0.##"
             except Exception:
                 pass
             if a_numero(unitario):
