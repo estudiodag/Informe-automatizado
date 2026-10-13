@@ -200,11 +200,14 @@ Reglas de interpretacion:
   "7 panos", "pint 7", "7p" -> pintura = 7.
   "chapa 3", "3 dias", "3d", "3 jornadas" -> chapa = 3.
   "12 hs mecanica", "mecanica 12" -> mecanica = 12.
-  LAS CANTIDADES PUEDEN TENER DECIMALES (horas y medias, pañitos
-  parciales, etc). Interpretar coma Y punto como separador decimal:
-  "mec 1,5" o "mec 1.5" -> mecanica = 1.5 (NO 15).
-  "pint 7,25" -> pintura = 7.25.
-  "0,5 dias chapa" -> chapa = 0.5.
+  ⚠️ IMPORTANTE: LAS CANTIDADES SON NUMEROS DECIMALES (float). NUNCA
+  redondees. Interpretar coma Y punto como separador decimal:
+  * "mec 1,5" o "mec 1.5" -> mecanica = 1.5 (NO 15, NO 2, NO 1).
+  * "pint 8,5" -> pintura = 8.5 (NO 9, NO 85, NO 8).
+  * "pint 7,25" -> pintura = 7.25.
+  * "0,5 dias chapa" -> chapa = 0.5.
+  * "chapa 2" -> chapa = 2 (sin decimales, pero es un float valido).
+  En el JSON devolvé el numero con el PUNTO decimal: {"pintura": 8.5}.
 - "carga de gas", "varios", "service", "cristaleria", "vidrieria",
   "alineacion", "electricidad" -> NO son cantidades de unidades; son
   items con un SUBTOTAL EN PESOS. Sumá todos esos subtotales y guardalos
@@ -242,8 +245,10 @@ backticks, con esta estructura exacta:
   "tallerDireccion": "",
   "tallerLocalidad": "",
   "franquicia": 0,
-  "manoObra": {"pintura": 0, "chapa": 0, "mecanica": 0,
+  "manoObra": {"pintura": 8.5, "chapa": 2, "mecanica": 1.5,
                "tapiceria": 0, "varios": 0},
+  (nota: pintura/chapa/mecanica/tapiceria pueden ser decimales como
+  8.5 o 1.5, NO redondees; varios es monto entero en pesos)
   "danos": [{"accion": "CAMBIAR", "pieza": "nombre", "precio": 0}],
   "observaciones": ""
 }"""
@@ -271,6 +276,47 @@ def _extraer_json(texto):
     if ini >= 0 and fin > ini:
         t = t[ini:fin + 1]
     return json.loads(t)
+
+
+def _preservar_decimales_mano_obra(texto_original, manoObra_dict):
+    """
+    Busca en el texto original patrones tipo "pint 8,5", "mec 1.5",
+    "chapa 2,5", "tap 0,5", y si encuentra un decimal real, pisa el
+    valor en manoObra_dict (que puede haber sido redondeado por Claude).
+
+    Esto garantiza que los decimales del usuario se preserven aunque
+    Claude cometa el error de redondearlos.
+    """
+    if not texto_original or not isinstance(texto_original, str):
+        return
+    import re as _re
+    # Mapeos: nombre corto en texto -> key en el dict
+    mapas = [
+        (r"\bpint(?:ura)?\b", "pintura"),
+        (r"\bchapa\b",         "chapa"),
+        (r"\bmec(?:anica|anica)?\b", "mecanica"),
+        (r"\btap(?:iceria|iceria)?\b", "tapiceria"),
+    ]
+    for patron_nombre, key in mapas:
+        # Busca "nombre X,Y" o "X,Y nombre" en la MISMA linea.
+        # Uso [ \t]* en vez de \s* para que no cruce newlines.
+        patron_decimal = (
+            # "pint 8,5" / "pint 8.5"
+            rf"{patron_nombre}[ \t]*[:\-]?[ \t]*(\d+[.,]\d+)"
+            r"|"
+            # "8,5 pint" / "8.5 pint"
+            rf"(\d+[.,]\d+)[ \t]*{patron_nombre}"
+        )
+        try:
+            m = _re.search(patron_decimal, texto_original,
+                           flags=_re.IGNORECASE)
+            if m:
+                valor_str = m.group(1) or m.group(2)
+                valor = float(valor_str.replace(",", "."))
+                if valor > 0:
+                    manoObra_dict[key] = valor
+        except Exception:
+            pass
 
 
 def _mejorar_observaciones(texto):
@@ -638,6 +684,11 @@ def parsear_texto(texto):
     for k in ("pintura", "chapa", "mecanica", "tapiceria"):
         data["manoObra"][k] = a_numero_decimal(mo.get(k, 0))
     data["manoObra"]["varios"] = a_numero(mo.get("varios", 0))
+
+    # RED DE SEGURIDAD: si en el texto original hay patrones tipo
+    # "pint 8,5" o "mec 1.5", pisar lo que haya devuelto Claude con
+    # el decimal exacto. Esto cubre el caso donde Claude redondea.
+    _preservar_decimales_mano_obra(texto, data["manoObra"])
 
     danos = []
     for d in parsed.get("danos", []) or []:
