@@ -537,10 +537,15 @@ def _extraer_observaciones(celdas):
     """
     Busca el header "OBSERVACIONES" en la grilla y recoge las lineas
     de texto que siguen (hasta topar con otra seccion conocida o con
-    el final de la grilla). Devuelve las observaciones concatenadas
-    con puntos, o "" si no hay.
+    el final de la grilla).
+
+    SOLO mira el bloque de columnas del header + unas pocas a la derecha,
+    para no confundirse con la columna de mano de obra que suele estar
+    al lado. Devuelve las lineas separadas por salto de linea para que
+    Claude las trate como lineas individuales y las corrija conservando
+    la informacion.
     """
-    # Localizar la fila del header.
+    # Localizar la fila y columna del header.
     fila_header = None
     col_header = 0
     for (r, c), v in celdas.items():
@@ -554,21 +559,24 @@ def _extraer_observaciones(celdas):
     if fila_header is None:
         return ""
 
-    # Cortar cuando aparezca otra seccion (headers conocidos).
+    # El bloque de observaciones ocupa, tipicamente, las 3 columnas
+    # desde col_header. Solo miramos esas (no mas).
+    col_min = col_header
+    col_max = col_header + 2
+
     STOP_HEADERS = (
         "ESTIMACION MANO DE OBRA", "MANO DE OBRA Y REPUESTOS",
-        "INSPECTOR ACTUANTE", "RESPONSABLE", "TOTAL", "FRANQUICIA",
+        "INSPECTOR ACTUANTE",
         "NETO CIA", "NETO A CARGO",
     )
 
     lineas = []
-    # Buscar filas por debajo del header en la misma columna (o cercanas).
     filas_debajo = sorted(set(r for (r, c) in celdas.keys()
                               if fila_header < r < fila_header + 30))
     for r in filas_debajo:
-        # ¿Es alguna otra seccion? -> cortar
+        # ¿Es alguna otra seccion? Solo chequear en el bloque de obs.
         detener = False
-        for c in range(20):
+        for c in range(col_min, col_max + 1):
             v = celdas.get((r, c))
             if isinstance(v, str):
                 vu = v.strip().upper()
@@ -578,22 +586,21 @@ def _extraer_observaciones(celdas):
         if detener:
             break
 
-        # Recolectar los textos de esta fila.
+        # Recolectar los textos SOLO del bloque de obs (col_min..col_max).
         textos_fila = []
-        for c in range(20):
+        for c in range(col_min, col_max + 1):
             v = celdas.get((r, c))
             if isinstance(v, str) and v.strip():
                 textos_fila.append(v.strip())
         if textos_fila:
-            # Filtrar duplicados dentro de la fila (a veces la misma
-            # frase aparece en dos columnas por celdas combinadas).
             vistos = []
             for t in textos_fila:
                 if t not in vistos:
                     vistos.append(t)
             lineas.append(" ".join(vistos))
 
-    return ". ".join(lineas).strip()
+    # Separar con salto de linea para preservar la estructura visual.
+    return "\n".join(lineas).strip()
 
 
 def _extraer_mano_obra_y_franquicia(celdas):

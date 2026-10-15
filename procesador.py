@@ -340,13 +340,15 @@ def _mejorar_observaciones(texto):
     if not texto or not texto.strip():
         return texto
 
-    # Limpiar el texto: colapsar espacios y tabs multiples, eliminar
-    # saltos de linea sueltos, sacar encabezados como "OBSERVACIONES:"
-    # que a veces vienen pegados desde la grilla del peritaje.
+    # Limpiar el texto: colapsar tabs y espacios multiples PERO
+    # PRESERVAR los saltos de linea (cada linea es una observacion
+    # distinta y debe mantenerse como linea separada).
     import re as _re
     texto_limpio = str(texto)
-    # Colapsar tabs, espacios y saltos de linea en un solo espacio.
-    texto_limpio = _re.sub(r"[\t\r\n ]+", " ", texto_limpio).strip()
+    # Colapsar solo tabs y espacios (no \n).
+    texto_limpio = _re.sub(r"[ \t]+", " ", texto_limpio)
+    # Colapsar multiples saltos de linea en uno solo.
+    texto_limpio = _re.sub(r"\n\s*\n+", "\n", texto_limpio).strip()
     # Sacar la palabra "OBSERVACIONES" o "OBSERVACIONES:" al inicio.
     texto_limpio = _re.sub(r"^OBSERVACIONES\s*:?\s*", "", texto_limpio,
                            flags=_re.IGNORECASE)
@@ -355,25 +357,24 @@ def _mejorar_observaciones(texto):
 
     instruccion = (
         "Sos un asistente de redaccion para informes de tasacion de "
-        "seguros de automotores. Recibiras un texto crudo con las "
-        "observaciones que anoto un perito durante la inspeccion. "
-        "Tu tarea: reescribirlas en tono tecnico, formal y profesional, "
-        "con oraciones completas, buena ortografia y puntuacion. "
+        "seguros de automotores. Recibiras las observaciones que anoto "
+        "un perito durante la inspeccion, UNA LINEA POR OBSERVACION. "
+        "Tu tarea: corregir ortografia, puntuacion y errores de "
+        "sintaxis de CADA LINEA, manteniendola como UNA LINEA SEPARADA. "
+        "No fusiones lineas ni las conviertas en prosa.\n"
         "REGLAS ESTRICTAS:\n"
-        "- NO agregues informacion, conclusiones ni datos que no esten "
-        "en el texto original. Nada de inventar.\n"
-        "- NO quites ningun hecho ni dato mencionado.\n"
-        "- NO cambies el sentido. Si el perito expresa una duda o "
-        "hipotesis, debe seguir siendo una duda o hipotesis.\n"
-        "- Si el texto original es muy breve (una o dos frases), "
-        "expandilo minimamente a una redaccion completa sin agregar "
-        "informacion nueva. Ejemplo: 'Motivo: Incendio' se puede "
-        "reescribir como 'El motivo de la inspeccion es un siniestro "
-        "por incendio.'\n"
-        "- Mantene siglas y abreviaturas si aparecen (DT, PT, etc).\n"
-        "- Devolve UNICAMENTE el texto reescrito, en una o varias "
-        "oraciones prolijas. Sin comillas, sin comentarios, sin "
-        "encabezado 'Observaciones:' ni nada por el estilo."
+        "- Devolve EXACTAMENTE la misma cantidad de lineas que recibiste.\n"
+        "- NO agregues informacion, datos, conclusiones ni comentarios. \n"
+        "- NO quites ningun dato, cifra, nombre ni abreviacion.\n"
+        "- NO cambies el sentido ni fusiones lineas.\n"
+        "- Corregi solo ortografia, acentuacion y puntuacion. Por "
+        "ejemplo: 'ip incendio parcial' -> 'IP: Incendio parcial'; "
+        "'contact: 11 6518 3100' -> 'Contacto: 11 6518 3100'; "
+        "'rep a cotizar' -> 'Repuestos a cotizar'.\n"
+        "- Mantene siglas, abreviaturas tecnicas, numeros, direcciones "
+        "y datos tal cual (ej: 'DT', 'PT', '$ 3.150.000', 'LVC227').\n"
+        "- Devolve UNICAMENTE las lineas corregidas, una por renglon, "
+        "sin encabezado, sin comentarios, sin numeracion extra."
     )
 
     try:
