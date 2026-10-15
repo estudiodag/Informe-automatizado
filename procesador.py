@@ -1302,11 +1302,12 @@ def completar_plantilla(plantilla_bytes, data):
 
     # ---------- 3) OBSERVACIONES ----------
     # Despues de ampliar: la celda OBSERVACIONES "titulo" se desplazo
-    # extras filas hacia abajo. Las filas de contenido son:
-    #    (52 + extras) a (57 + extras)
+    # extras filas hacia abajo. Las observaciones ocupan 10 filas
+    # (52-61 originalmente), al lado del bloque de MO y totales que
+    # estan en D:H. Como las obs son solo A:C, no chocan con nada.
     fila_obs_titulo = 51 + extras
     fila_obs_inicio = 52 + extras
-    fila_obs_fin = 57 + extras
+    fila_obs_fin = 61 + extras
     _preparar_celda_observaciones(ws, fila_obs_inicio, fila_obs_fin)
 
     obs = (data.get("observaciones") or "").strip()
@@ -1323,20 +1324,17 @@ def completar_plantilla(plantilla_bytes, data):
             )
         except Exception:
             pass
-        # Ajustar la altura de las filas de observaciones para que
-        # entren TODAS las lineas visibles. La celda merged A{ini}:C{fin}
-        # abarca (fin - ini + 1) filas. Si el texto tiene mas lineas de
-        # las que caben con el alto por defecto, aumentamos el alto de
-        # cada fila proporcionalmente.
+        # Si aun asi hay mas lineas que filas disponibles (10), ampliar
+        # la altura de las filas de obs sin afectar las de MO.
+        # Las filas de MO son 52+extras..57+extras. Las "libres" para
+        # expandir sin afectar MO son 58+extras..61+extras (totales,
+        # cuyo contenido ya cabe en una fila cada uno).
         try:
             num_lineas = obs.count("\n") + 1
-            n_filas = fila_obs_fin - fila_obs_inicio + 1  # tipicamente 6
-            # Alto por linea en Excel: ~18pt (con pequeño margen para
-            # que las lineas largas con wrap tambien entren).
+            n_filas = fila_obs_fin - fila_obs_inicio + 1  # 10
             if num_lineas > n_filas:
                 alto_necesario_por_fila = (num_lineas * 18.0) / n_filas
-                # Minimo 18, maximo 80 por fila (para no exagerar).
-                alto_por_fila = max(18.0, min(80.0, alto_necesario_por_fila))
+                alto_por_fila = max(18.0, min(60.0, alto_necesario_por_fila))
                 for r in range(fila_obs_inicio, fila_obs_fin + 1):
                     ws.row_dimensions[r].height = alto_por_fila
         except Exception:
