@@ -312,6 +312,56 @@ def parsear_peritaje_excel(datos, nombre_archivo):
     return resultado
 
 
+def _normalizar_accion(accion_raw):
+    """
+    Normaliza el texto de una accion a una de:
+      CAMBIAR  - si cambia una pieza (lleva precio de repuesto)
+      REPARAR  - trabajo de chapa / arreglo (sin precio)
+      DIFUMINAR - difuminar pintura (sin precio, va tal cual)
+      PINTAR   - pintar (sin precio, va tal cual)
+    Devuelve None si no reconoce el texto.
+    """
+    if not accion_raw:
+        return None
+    s = str(accion_raw).strip().upper()
+    # Quitar puntos finales, dos puntos, etc.
+    s = s.rstrip(".:,;").strip()
+    # Quitar tildes para match
+    s = (s.replace("Á","A").replace("É","E").replace("Í","I")
+          .replace("Ó","O").replace("Ú","U"))
+    if not s:
+        return None
+
+    # CAMBIAR: cambio, cambiar, sustituir, sustitucion, reemplazar, "C"
+    if s in ("C", "CAMB", "CAMBIO", "CAMBIAR",
+             "SUST", "SUSTITUCION", "SUSTITUIR",
+             "REEMPLAZAR", "REEMPLAZO", "RMPLZ"):
+        return "CAMBIAR"
+    if "SUSTIT" in s or "REEMPLAZ" in s or "CAMBI" in s:
+        return "CAMBIAR"
+
+    # REPARAR: reparar, rep, reparacion, arreglar
+    if s in ("R", "REP", "REPARAR", "REPARACION",
+             "ARREGLAR", "ARREGLO"):
+        return "REPARAR"
+    if "REPARA" in s or "ARREGL" in s:
+        return "REPARAR"
+
+    # DIFUMINAR: difuminar, difumin, dif
+    if s in ("D", "DIF", "DIFU", "DIFUMINAR", "DIFUMINADO"):
+        return "DIFUMINAR"
+    if "DIFUMIN" in s:
+        return "DIFUMINAR"
+
+    # PINTAR: pintar, pint (ojo: "PINT" solo pintar, no pintura MO)
+    if s in ("P", "PINT", "PINTAR", "PINTADO"):
+        return "PINTAR"
+    if s.startswith("PINT") and "URA" not in s:
+        return "PINTAR"
+
+    return None
+
+
 def _parsear_formato_dag(celdas):
     """
     Parser para el formato DAG: un informe de tasacion ya pre-cargado
@@ -377,8 +427,9 @@ def _parsear_formato_dag(celdas):
             break
         if not v_accion or not v_pieza:
             continue
-        accion = str(v_accion).strip().upper()
-        if accion not in ("CAMBIAR", "REPARAR"):
+        accion_raw = str(v_accion).strip().upper()
+        accion = _normalizar_accion(accion_raw)
+        if accion is None:
             continue
         pieza = str(v_pieza).strip()
         if not pieza:

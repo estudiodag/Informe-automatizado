@@ -124,8 +124,20 @@ desordenado, con abreviaturas, datos de poliza mezclados, etc.) y tu tarea \
 es EXTRAER los datos y devolverlos en formato JSON estricto.
 
 Reglas de interpretacion:
-- Las piezas bajo "SUSTITUIR" o "CAMBIAR" tienen accion "CAMBIAR".
-- Las piezas bajo "PINTAR" o "REPARAR" tienen accion "REPARAR".
+- Acciones posibles (devolver EXACTAMENTE una de estas 4 en el campo
+  "accion", en MAYUSCULAS):
+  * "CAMBIAR" -> cambiar/sustituir/reemplazar la pieza (lleva precio
+    de repuesto). Sinonimos: sustitucion, sustituir, cambio, "C".
+  * "REPARAR" -> reparar/arreglar sin cambiar. Sinonimos: rep,
+    reparacion, arreglar, "R". NO lleva precio.
+  * "DIFUMINAR" -> difuminar pintura (tarea de pintura parcial).
+    Sinonimos: difumin, dif, "D". NO lleva precio.
+  * "PINTAR" -> pintar la pieza (tarea de pintura completa).
+    Sinonimos: pint (NO confundir con "pintura" que es mano de obra),
+    "P". NO lleva precio.
+  Si en el texto dice "sustitucion" devolve "CAMBIAR"; si dice
+  "difuminar" devolve "DIFUMINAR"; si dice "pintar" devolve "PINTAR".
+  Mantene la distincion: DIFUMINAR y PINTAR NO son lo mismo que REPARAR.
 
 - PIEZAS DEL PERITAJE (pre-extraidas): si el texto incluye un bloque
   "=== PIEZAS DEL PERITAJE (extraidas del Excel) ===", ese bloque es la
@@ -692,10 +704,10 @@ def parsear_texto(texto):
 
     danos = []
     for d in parsed.get("danos", []) or []:
-        accion = normalizar(d.get("accion", ""))
-        accion = "CAMBIAR" if accion not in ("REPARAR",) else "REPARAR"
+        from parser_peritaje import _normalizar_accion
+        accion = _normalizar_accion(d.get("accion", "")) or "CAMBIAR"
         pieza = str(d.get("pieza", "")).strip()
-        # Solo las piezas a CAMBIAR llevan precio; las REPARAR van en 0.
+        # Solo las piezas a CAMBIAR llevan precio; REPARAR/DIFUMINAR/PINTAR en 0.
         precio = a_numero(d.get("precio", 0)) if accion == "CAMBIAR" else 0
         if pieza:
             danos.append({"accion": accion, "pieza": pieza,

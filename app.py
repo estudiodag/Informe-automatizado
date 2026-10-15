@@ -295,6 +295,17 @@ def procesar_informe():
         excel_bytes = None
         excel_nombre = ""
 
+        # Si entre los adjuntos del ENCABEZADO (seccion 2) hay un XLSX,
+        # tratarlo tambien como posible peritaje: puede ser un informe
+        # DAG ya pre-cargado con piezas y mano de obra. Si lo es, el
+        # parser local va a extraerlas; si no, no pasa nada.
+        for arch in encab_archivos:
+            nombre = (arch.get("nombre") or "").lower()
+            if nombre.endswith((".xlsx", ".xls")) and not excel_bytes:
+                excel_bytes = arch.get("bytes") or b""
+                excel_nombre = arch.get("nombre") or ""
+                break
+
         if "excel_perit" in request.files:
             f = request.files["excel_perit"]
             if f and f.filename != "":
